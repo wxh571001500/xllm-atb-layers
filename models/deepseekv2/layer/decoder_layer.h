@@ -91,6 +91,7 @@ public:
     std::string processLogits = "scaling";
     std::string backend = "hccl";
     std::string rankTableFile = "";
+    // Compatibility vector: entries may be legacy LinearType or new LinearDesc.
     std::vector<int> attnLinearQuantType = {};
     std::vector<int> attnLinearTransposeType = {};
     atb::SVector<int32_t> topkGroups = {1}; // num of selected groups

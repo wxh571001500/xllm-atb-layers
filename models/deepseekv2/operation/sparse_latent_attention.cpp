@@ -37,6 +37,44 @@ namespace deepseekV2 {
 using namespace atb_speed::common;
 
 namespace sparse {
+constexpr uint64_t INDEXER_WQ_B_LINEAR_INDEX = 6;
+constexpr uint64_t INDEXER_WK_LINEAR_INDEX = 7;
+constexpr uint64_t INDEXER_PROJ_LINEAR_INDEX = 8;
+
+bool UseAttnLinearDesc(const std::vector<int> &attnLinearQuantType)
+{
+    // This field is backward-compatible: old callers pass LinearType, while
+    // newer callers can pass LinearDesc for per-linear quant selection.
+    for (int linearType : attnLinearQuantType) {
+        if (linearType >= LinearDesc::W4A16_DESC) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int GetLinearTransposeType(const std::vector<int> &transposeTypes, uint64_t index, int defaultValue)
+{
+    return index < transposeTypes.size() ? transposeTypes[index] : defaultValue;
+}
+
+template <typename NormParamType>
+LinearQuantType GetAttnLinearQuantType(
+    const LatentAttentionParam<NormParamType> &param, uint64_t linearIndex, bool hasNorm)
+{
+    bool useLinearDesc = UseAttnLinearDesc(param.attnLinearQuantType);
+    int linearDesc = useLinearDesc ? param.attnLinearQuantType[linearIndex] : LinearDesc::INVALID_DESC;
+    int linearType = useLinearDesc &&
+        (linearDesc == LinearDesc::FLOAT16_DESC || linearDesc == LinearDesc::BFLOAT16_DESC) ?
+        LinearType::FP : param.attnLinearQuantType[linearIndex];
+    return GetLinearQuantType(
+        param.denseQuantType == atb_speed::common::PackQuantType::PACK_QUANT_UNDEFINED ?
+            param.packQuantType : param.denseQuantType,
+        linearType,
+        hasNorm,
+        linearDesc);
+}
+
 template <typename NormParamType>
 bool EnableFA3Quant(const LatentAttentionParam<NormParamType> &param)
 {
@@ -199,10 +237,7 @@ std::map<std::string, std::vector<std::string>> GetLatentAttnIntermediateTensorC
 template <typename NormParamType>
 bool UseExtraQuant(const LatentAttentionParam<NormParamType> &param, uint64_t linearIndex)
 {
-    LinearQuantType quantType = GetLinearQuantType(
-        param.denseQuantType == atb_speed::common::PackQuantType::PACK_QUANT_UNDEFINED \
-            ? param.packQuantType : param.denseQuantType,
-        param.attnLinearQuantType[linearIndex], true);
+    LinearQuantType quantType = GetAttnLinearQuantType(param, linearIndex, true);
     if (quantType == LinearQuantType::LINEAR_W8A8_DEQUANT || \
         quantType == LinearQuantType::LINEAR_W8A8_SC_DEQUANT) {
         return true;
@@ -669,10 +704,7 @@ atb::Status AddLAttnQKVProjNode(const LatentAttentionParam<NormParamType> &param
     atb_speed::common::FusionLinearParam kvAProjNodeParam;
     kvAProjNodeParam.isBF16 = param.isBF16;
     kvAProjNodeParam.hasBias = param.selfAttnHasBias;
-    kvAProjNodeParam.quantType = GetLinearQuantType(
-        param.denseQuantType == atb_speed::common::PackQuantType::PACK_QUANT_UNDEFINED ? \
-            param.packQuantType : param.denseQuantType,
-        param.attnLinearQuantType[Q_PROJ_A_LINEAR_INDEX], true);
+    kvAProjNodeParam.quantType = GetAttnLinearQuantType(param, Q_PROJ_A_LINEAR_INDEX, true);
     if (kvAProjNodeParam.quantType == LinearQuantType::LINEAR_W8A8_DYNAMIC_DEQUANT) {
         kvAProjNodeParam.quantType = LinearQuantType::LINEAR_W8A8_DYNAMIC_QUANT;
     }
@@ -725,10 +757,7 @@ atb::Status AddLAttnQProjANode(const LatentAttentionParam<NormParamType> &param,
     atb_speed::common::FusionLinearParam qAProjNodeParam;
     qAProjNodeParam.isBF16 = param.isBF16;
     qAProjNodeParam.hasBias = param.selfAttnHasBias;
-    qAProjNodeParam.quantType = GetLinearQuantType(
-        param.denseQuantType == atb_speed::common::PackQuantType::PACK_QUANT_UNDEFINED \
-            ? param.packQuantType : param.denseQuantType,
-        param.attnLinearQuantType[Q_PROJ_A_LINEAR_INDEX], true);
+    qAProjNodeParam.quantType = GetAttnLinearQuantType(param, Q_PROJ_A_LINEAR_INDEX, true);
     qAProjNodeParam.quantGroupSize = param.quantGroupSize;
     qAProjNodeParam.transposeType = param.attnLinearTransposeType[Q_PROJ_A_LINEAR_INDEX];
     qAProjNode.inTensorIds = {
@@ -772,10 +801,7 @@ atb::Status AddLAttnQProjBNode(const LatentAttentionParam<NormParamType> &param,
     atb_speed::common::FusionLinearParam qBProjNodeParam;
     qBProjNodeParam.isBF16 = param.isBF16;
     qBProjNodeParam.hasBias = param.selfAttnHasBias;
-    qBProjNodeParam.quantType = GetLinearQuantType(
-        param.denseQuantType == atb_speed::common::PackQuantType::PACK_QUANT_UNDEFINED \
-            ? param.packQuantType : param.denseQuantType,
-        param.attnLinearQuantType[Q_PROJ_B_LINEAR_INDEX], true);
+    qBProjNodeParam.quantType = GetAttnLinearQuantType(param, Q_PROJ_B_LINEAR_INDEX, true);
     if (qBProjNodeParam.quantType == LinearQuantType::LINEAR_W8A8_DYNAMIC_DEQUANT) {
         qBProjNodeParam.quantType = LinearQuantType::LINEAR_W8A8_DYNAMIC_QUANT;
     }
@@ -845,10 +871,7 @@ atb::Status AddReprojQNode(const LatentAttentionParam<NormParamType> &param, atb
     atb_speed::common::FusionLinearParam qReprojNodeParam;
     qReprojNodeParam.isBF16 = param.isBF16;
     qReprojNodeParam.hasBias = param.selfAttnHasBias;
-    qReprojNodeParam.quantType = GetLinearQuantType(
-        param.denseQuantType == atb_speed::common::PackQuantType::PACK_QUANT_UNDEFINED \
-            ? param.packQuantType : param.denseQuantType,
-        param.attnLinearQuantType[KV_PROJ_B_FOR_Q_LINEAR_INDEX], false);
+    qReprojNodeParam.quantType = GetAttnLinearQuantType(param, KV_PROJ_B_FOR_Q_LINEAR_INDEX, false);
     qReprojNodeParam.quantGroupSize = param.quantGroupSize;
     qReprojNodeParam.transposeType = false;
     qReprojNodeParam.enEin = true;
@@ -877,10 +900,7 @@ atb::Status AddLAttnKVAProjNode(const LatentAttentionParam<NormParamType> &param
     atb_speed::common::FusionLinearParam kvAProjNodeParam;
     kvAProjNodeParam.isBF16 = param.isBF16;
     kvAProjNodeParam.hasBias = param.selfAttnHasBias;
-    kvAProjNodeParam.quantType = GetLinearQuantType(
-        param.denseQuantType == atb_speed::common::PackQuantType::PACK_QUANT_UNDEFINED \
-            ? param.packQuantType : param.denseQuantType,
-        param.attnLinearQuantType[KV_PROJ_A_LINEAR_INDEX], true);
+    kvAProjNodeParam.quantType = GetAttnLinearQuantType(param, KV_PROJ_A_LINEAR_INDEX, true);
     kvAProjNodeParam.quantGroupSize = param.quantGroupSize;
     kvAProjNodeParam.transposeType = param.attnLinearTransposeType[KV_PROJ_A_LINEAR_INDEX];
     kvAProjNode.inTensorIds = {
@@ -1047,10 +1067,7 @@ atb::Status AddReprojVNode(const LatentAttentionParam<NormParamType> &param, atb
     atb_speed::common::FusionLinearParam vReprojNodeParam;
     vReprojNodeParam.isBF16 = param.isBF16;
     vReprojNodeParam.hasBias = param.selfAttnHasBias;
-    vReprojNodeParam.quantType = GetLinearQuantType(
-        param.denseQuantType == atb_speed::common::PackQuantType::PACK_QUANT_UNDEFINED \
-            ? param.packQuantType : param.denseQuantType,
-        param.attnLinearQuantType[KV_PROJ_B_FOR_V_LINEAR_INDEX], false);
+    vReprojNodeParam.quantType = GetAttnLinearQuantType(param, KV_PROJ_B_FOR_V_LINEAR_INDEX, false);
     vReprojNodeParam.quantGroupSize = param.quantGroupSize;
     vReprojNodeParam.transposeType = false;
     CHECK_OPERATION_STATUS_RETURN(FusionLinear(vReprojNodeParam, &vReprojNode.operation));
@@ -1188,10 +1205,7 @@ atb::Status SetSelfOutLinearParallelParam(const LatentAttentionParam<NormParamTy
     selfOutLinearParam.parallelType = atb_speed::common::ROW_PARALLEL;
     selfOutLinearParam.fusionLinearParam.isBF16 = param.isBF16;
     selfOutLinearParam.fusionLinearParam.hasBias = param.selfAttnHasBias && !selfOutLinearParam.biasAfterSync;
-    selfOutLinearParam.fusionLinearParam.quantType = GetLinearQuantType(
-        param.denseQuantType == atb_speed::common::PackQuantType::PACK_QUANT_UNDEFINED \
-            ? param.packQuantType : param.denseQuantType,
-        param.attnLinearQuantType[O_LINEAR_INDEX], false);
+    selfOutLinearParam.fusionLinearParam.quantType = GetAttnLinearQuantType(param, O_LINEAR_INDEX, false);
     if (selfOutLinearParam.fusionLinearParam.quantType == LinearQuantType::LINEAR_W8A8_QUANT &&
         param.enableExtraOprojTp) {
         selfOutLinearParam.fusionLinearParam.quantType = LinearQuantType::LINEAR_W8A8_DEQUANT;
@@ -1516,10 +1530,7 @@ atb::Status AddLAttnQProjRecalNode(const LatentAttentionParam<NormParamType> &pa
     atb_speed::common::FusionLinearParam qProjaRecalParam;
     qProjaRecalParam.isBF16 = param.isBF16;
     qProjaRecalParam.hasBias = param.selfAttnHasBias;
-    qProjaRecalParam.quantType = GetLinearQuantType(
-        param.denseQuantType == atb_speed::common::PackQuantType::PACK_QUANT_UNDEFINED ? \
-            param.packQuantType : param.denseQuantType,
-        param.attnLinearQuantType[Q_PROJ_A_LINEAR_INDEX], true);
+    qProjaRecalParam.quantType = GetAttnLinearQuantType(param, Q_PROJ_A_LINEAR_INDEX, true);
     if (qProjaRecalParam.quantType == LinearQuantType::LINEAR_W8A8_DYNAMIC_DEQUANT) {
         qProjaRecalParam.quantType = LinearQuantType::LINEAR_W8A8_DYNAMIC_QUANT;
     }
@@ -1549,7 +1560,10 @@ atb::Status AddIndexerQBNode(const LatentAttentionParam<NormParamType> &param,
     qProjbParam.isBF16 = param.isBF16;
     qProjbParam.quantType = atb_speed::common::LinearQuantType::NO_QUANT;
     qProjbParam.quantGroupSize = param.quantGroupSize;
-    qProjbParam.transposeType = param.attnLinearTransposeType[Q_PROJ_B_LINEAR_INDEX];
+    qProjbParam.transposeType = GetLinearTransposeType(
+        param.attnLinearTransposeType,
+        INDEXER_WQ_B_LINEAR_INDEX,
+        param.attnLinearTransposeType[Q_PROJ_B_LINEAR_INDEX]);
     qProjbNode.inTensorIds = {
         GetTensorIdx(tensorMap, {"intermediate_indexer_qa_norm"}),
         GetTensorIdx(tensorMap, "in_indexer_proj_wq_b_weight"),
@@ -1598,7 +1612,10 @@ atb::Status AddIndexerKNode(const LatentAttentionParam<NormParamType> &param,
     kProjNodeParam.isBF16 = param.isBF16;
     kProjNodeParam.quantType = atb_speed::common::LinearQuantType::NO_QUANT;
     kProjNodeParam.quantGroupSize = param.quantGroupSize;
-    kProjNodeParam.transposeType = param.attnLinearTransposeType[Q_PROJ_B_LINEAR_INDEX];
+    kProjNodeParam.transposeType = GetLinearTransposeType(
+        param.attnLinearTransposeType,
+        INDEXER_WK_LINEAR_INDEX,
+        param.attnLinearTransposeType[Q_PROJ_B_LINEAR_INDEX]);
     kProjNode.inTensorIds = {
         GetTensorIdx(tensorMap, "intermediate_indexer_input_norm"),
         GetTensorIdx(tensorMap, "in_indexer_proj_wk_weight"),
@@ -1754,7 +1771,10 @@ atb::Status AddIndexerWeightNode(const LatentAttentionParam<NormParamType> &para
     indexerWeightParam.isBF16 = param.isBF16;
     indexerWeightParam.quantType = atb_speed::common::LinearQuantType::NO_QUANT;
     indexerWeightParam.quantGroupSize = param.quantGroupSize;
-    indexerWeightParam.transposeType = param.attnLinearTransposeType[Q_PROJ_B_LINEAR_INDEX];
+    indexerWeightParam.transposeType = GetLinearTransposeType(
+        param.attnLinearTransposeType,
+        INDEXER_PROJ_LINEAR_INDEX,
+        param.attnLinearTransposeType[Q_PROJ_B_LINEAR_INDEX]);
     indexerWeightNode.inTensorIds = {
         GetTensorIdx(tensorMap, "intermediate_indexer_input_norm"),
         GetTensorIdx(tensorMap, "in_indexer_proj_weight"),

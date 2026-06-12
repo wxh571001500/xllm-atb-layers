@@ -69,6 +69,7 @@ struct LatentAttentionParam {
     bool outputTopk = false;
 
     int packQuantType = atb_speed::common::PackQuantType::ALL_FP;
+    // Compatibility vector: entries may be legacy LinearType or new LinearDesc.
     std::vector<int> attnLinearQuantType = {};
     std::vector<int> attnLinearTransposeType = {};
     NormParamType normParamType;
