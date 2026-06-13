@@ -1558,7 +1558,10 @@ atb::Status AddIndexerQBNode(const LatentAttentionParam<NormParamType> &param,
     atb::Node qProjbNode;
     atb_speed::common::FusionLinearParam qProjbParam;
     qProjbParam.isBF16 = param.isBF16;
-    qProjbParam.quantType = atb_speed::common::LinearQuantType::NO_QUANT;
+    qProjbParam.quantType =
+        param.attnLinearQuantType.size() > INDEXER_WQ_B_LINEAR_INDEX ?
+            GetAttnLinearQuantType(param, INDEXER_WQ_B_LINEAR_INDEX, false) :
+            atb_speed::common::LinearQuantType::NO_QUANT;
     qProjbParam.quantGroupSize = param.quantGroupSize;
     qProjbParam.transposeType = GetLinearTransposeType(
         param.attnLinearTransposeType,
