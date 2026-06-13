@@ -45,6 +45,9 @@ bool UseAttnLinearDesc(const std::vector<int> &attnLinearQuantType)
 {
     // This field is backward-compatible: old callers pass LinearType, while
     // newer callers can pass LinearDesc for per-linear quant selection.
+    if (attnLinearQuantType.size() > INDEXER_PROJ_LINEAR_INDEX) {
+        return true;
+    }
     for (int linearType : attnLinearQuantType) {
         if (linearType >= LinearDesc::W4A16_DESC) {
             return true;

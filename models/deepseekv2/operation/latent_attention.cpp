@@ -30,10 +30,17 @@ namespace atb_speed {
 namespace deepseekV2 {
 using namespace atb_speed::common;
 
+namespace {
+constexpr uint64_t ATTN_LINEAR_DESC_COUNT = 6;
+} // namespace
+
 bool UseAttnLinearDesc(const std::vector<int> &attnLinearQuantType)
 {
     // This field is backward-compatible: old callers pass LinearType, while
     // newer callers can pass LinearDesc for per-linear quant selection.
+    if (attnLinearQuantType.size() > ATTN_LINEAR_DESC_COUNT) {
+        return true;
+    }
     for (int linearType : attnLinearQuantType) {
         if (linearType >= LinearDesc::W4A16_DESC) {
             return true;
