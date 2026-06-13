@@ -30,17 +30,10 @@ namespace atb_speed {
 namespace deepseekV2 {
 using namespace atb_speed::common;
 
-namespace {
-constexpr uint64_t ATTN_LINEAR_DESC_COUNT = 6;
-} // namespace
-
 bool UseAttnLinearDesc(const std::vector<int> &attnLinearQuantType)
 {
     // This field is backward-compatible: old callers pass LinearType, while
     // newer callers can pass LinearDesc for per-linear quant selection.
-    if (attnLinearQuantType.size() > ATTN_LINEAR_DESC_COUNT) {
-        return true;
-    }
     for (int linearType : attnLinearQuantType) {
         if (linearType >= LinearDesc::W4A16_DESC) {
             return true;
@@ -1430,7 +1423,7 @@ atb::Status AddFusedQBNode(const LatentAttentionParam<NormParamType> &param,
     qBProjNodeParam.commDomain = param.lcocAttnTpDomain;
     qBProjNodeParam.quantType = atb::infer::LinearParallelParam::QuantType::QUANT_TYPE_PER_CHANNEL;
     qBProjNodeParam.quantGroupSize = param.quantGroupSize;
-    qBProjNodeParam.outDataType = aclDataType::ACL_FLOAT16;
+    qBProjNodeParam.outDataType = param.isBF16 ? aclDataType::ACL_BF16 : aclDataType::ACL_FLOAT16;
 
     CHECK_OPERATION_STATUS_RETURN(atb::CreateOperation(qBProjNodeParam, &qBProjNode.operation));
     qBProjNode.inTensorIds = {
@@ -1477,7 +1470,7 @@ atb::Status AddSelfFusedOutLinearParallelNode(const LatentAttentionParam<NormPar
     selfFusedOutLinearParam.commDomain = param.lcocAttnTpDomain;
     selfFusedOutLinearParam.quantType = atb::infer::LinearParallelParam::QuantType::QUANT_TYPE_PER_CHANNEL;
     selfFusedOutLinearParam.quantGroupSize = param.quantGroupSize;
-    selfFusedOutLinearParam.outDataType = aclDataType::ACL_FLOAT16;
+    selfFusedOutLinearParam.outDataType = param.isBF16 ? aclDataType::ACL_BF16 : aclDataType::ACL_FLOAT16;
 
     CHECK_OPERATION_STATUS_RETURN(atb::CreateOperation(selfFusedOutLinearParam,
         &selfFusedOutLinearParallelNode.operation));
