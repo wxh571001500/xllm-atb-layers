@@ -21,6 +21,7 @@
 
 #include "atb/atb_infer.h"
 #include "atb_speed/base/hosttensor_binder.h"
+#include "operations/fusion/utils.h"
 
 namespace atb_speed {
 namespace eagle3 {
@@ -51,6 +52,7 @@ struct DecoderLayerParam {
     int hiddenSizePerAttentionHead = 0;
     int numKeyValueHeadsPerRank = 0;
     float rmsNormEps = 0;
+    atb_speed::common::TensorParallelInfo tensorParallelInfo;
 
     std::vector<int> seqLen;
     std::vector<int> tokenOffset;

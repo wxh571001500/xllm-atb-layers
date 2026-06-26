@@ -1099,8 +1099,38 @@ AddSelfOutLinearParallelNode(const FusionAttentionParam<NormParamType> &param,
   selfOutLinearParam.tensorParallelInfo = param.selfOutLinearTensorParallelInfo;
   selfOutLinearParam.supportLcoc = param.supportLcoc;
   selfOutLinearParam.enableMC2 = param.enableMC2;
-  CHECK_OPERATION_STATUS_RETURN(
-      LinearParallel(selfOutLinearParam, &selfOutLinearParallelNode.operation));
+  atb::Status linearStatus =
+      LinearParallel(selfOutLinearParam, &selfOutLinearParallelNode.operation);
+  if (linearStatus != atb::NO_ERROR) {
+    ATB_SPEED_LOG_ERROR("AddSelfOutLinearParallelNode LinearParallel failed, status="
+        << linearStatus << ", packQuantType=" << param.packQuantType
+        << ", denseQuantType=" << param.denseQuantType
+        << ", linearQuantType=" << param.layerLinearQuantType[DENSE_LINEAR_INDEX]
+        << ", linearDesc=" << param.layerLinearDescs[DENSE_LINEAR_INDEX]
+        << ", computedQuantType="
+        << selfOutLinearParam.fusionLinearParam.quantType
+        << ", hasBias=" << selfOutLinearParam.fusionLinearParam.hasBias
+        << ", biasAfterSync=" << selfOutLinearParam.biasAfterSync
+        << ", parallelType=" << selfOutLinearParam.parallelType
+        << ", worldSize="
+        << selfOutLinearParam.tensorParallelInfo.worldSize
+        << ", rank=" << selfOutLinearParam.tensorParallelInfo.rank
+        << ", backend=" << selfOutLinearParam.tensorParallelInfo.backend
+        << ", rankTableFile="
+        << selfOutLinearParam.tensorParallelInfo.rankTableFile
+        << ", commDomain="
+        << selfOutLinearParam.tensorParallelInfo.commDomain
+        << ", hcommInfo="
+        << (selfOutLinearParam.tensorParallelInfo.hcommInfo == nullptr)
+        << ", transposeType="
+        << selfOutLinearParam.fusionLinearParam.transposeType
+        << ", isBF16=" << selfOutLinearParam.fusionLinearParam.isBF16
+        << ", matmulBackend="
+        << selfOutLinearParam.fusionLinearParam.matmulBackend
+        << ", supportLcoc=" << selfOutLinearParam.supportLcoc
+        << ", enableMC2=" << selfOutLinearParam.enableMC2);
+    return linearStatus;
+  }
   std::vector<std::string> denseInTensorNames = {"intermediate_self_attention",
                                                  "in_weight_dense",
                                                  "in_scale_dense",
@@ -1700,24 +1730,56 @@ atb::Status Attention(const FusionAttentionParam<NormParamType> &param,
 
   if (param.enableRopeQuantKvcache) {
     // AddQNormLinearNode only, skip others
-    CHECK_OPERATION_STATUS_RETURN(
-        AddFAttnQKVLinearSplitNode(param, opGraph, tensorMap));
-    CHECK_OPERATION_STATUS_RETURN(
-        AddRopeQuantKvcacheOperation(opGraph, param, tensorMap));
+    atb::Status status = AddFAttnQKVLinearSplitNode(param, opGraph, tensorMap);
+    if (status != atb::NO_ERROR) {
+      ATB_SPEED_LOG_ERROR("Attention AddFAttnQKVLinearSplitNode failed, status="
+          << status << ", packQuantType=" << param.packQuantType
+          << ", qkvHasBias=" << param.qkvHasBias
+          << ", selfAttnHasBias=" << param.selfAttnHasBias
+          << ", isGroupedQueryAttention=" << param.isGroupedQueryAttention
+          << ", qHeads=" << param.selfAttentionParam.headNum
+          << ", kvHeads=" << param.selfAttentionParam.kvHeadNum
+          << ", headDim=" << param.headDim);
+      return status;
+    }
+    status = AddRopeQuantKvcacheOperation(opGraph, param, tensorMap);
+    if (status != atb::NO_ERROR) {
+      ATB_SPEED_LOG_ERROR("Attention AddRopeQuantKvcacheOperation failed, status=" << status);
+      return status;
+    }
   } else {
     // QKV Node
-    CHECK_OPERATION_STATUS_RETURN(
-        AddFAttnQKVLinearSplitNode(param, opGraph, tensorMap));
+    atb::Status status = AddFAttnQKVLinearSplitNode(param, opGraph, tensorMap);
+    if (status != atb::NO_ERROR) {
+      ATB_SPEED_LOG_ERROR("Attention AddFAttnQKVLinearSplitNode failed, status="
+          << status << ", packQuantType=" << param.packQuantType
+          << ", qkvHasBias=" << param.qkvHasBias
+          << ", selfAttnHasBias=" << param.selfAttnHasBias
+          << ", isGroupedQueryAttention=" << param.isGroupedQueryAttention
+          << ", isPrefill=" << param.isPrefill
+          << ", isFA=" << param.isFA
+          << ", qHeads=" << param.selfAttentionParam.headNum
+          << ", kvHeads=" << param.selfAttentionParam.kvHeadNum
+          << ", headDim=" << param.headDim);
+      return status;
+    }
 
     // Rope Node
     if (param.rotaryType != RotaryType::NO_ROTARY && !param.enableSplitRmsNormRope) {
-      CHECK_OPERATION_STATUS_RETURN(
-          AddFAttnRopeNode(param, opGraph, tensorMap));
+      status = AddFAttnRopeNode(param, opGraph, tensorMap);
+      if (status != atb::NO_ERROR) {
+        ATB_SPEED_LOG_ERROR("Attention AddFAttnRopeNode failed, status=" << status);
+        return status;
+      }
     }
 
     // QScale Node
     if (param.enableQScale) {
-      CHECK_OPERATION_STATUS_RETURN(AddQScaleNode(param, opGraph, tensorMap));
+      status = AddQScaleNode(param, opGraph, tensorMap);
+      if (status != atb::NO_ERROR) {
+        ATB_SPEED_LOG_ERROR("Attention AddQScaleNode failed, status=" << status);
+        return status;
+      }
     }
 
     bool atbAttentionDequant =
@@ -1729,11 +1791,17 @@ atb::Status Attention(const FusionAttentionParam<NormParamType> &param,
         param.aclnnIncreAttentionParam.hasKVQuant;
     if (atbAttentionDequant || aclnnAttentionDequant) {
       // K Quant
-      CHECK_OPERATION_STATUS_RETURN(
-          AddKVValueQuantNode(param, opGraph, tensorMap, true));
+      status = AddKVValueQuantNode(param, opGraph, tensorMap, true);
+      if (status != atb::NO_ERROR) {
+        ATB_SPEED_LOG_ERROR("Attention AddKValueQuantNode failed, status=" << status);
+        return status;
+      }
       // V Quant
-      CHECK_OPERATION_STATUS_RETURN(
-          AddKVValueQuantNode(param, opGraph, tensorMap, false));
+      status = AddKVValueQuantNode(param, opGraph, tensorMap, false);
+      if (status != atb::NO_ERROR) {
+        ATB_SPEED_LOG_ERROR("Attention AddVValueQuantNode failed, status=" << status);
+        return status;
+      }
     }
   }
 
@@ -1741,17 +1809,26 @@ atb::Status Attention(const FusionAttentionParam<NormParamType> &param,
   if (!param.isPrefill &&
       param.pageAttentionParam.quantType ==
           atb::infer::PagedAttentionParam::QuantType::TYPE_QUANT_QKV_ONLINE) {
-    CHECK_OPERATION_STATUS_RETURN(
-        AddQKVQuantNode(param, opGraph, tensorMap, "Q"));
+    atb::Status status = AddQKVQuantNode(param, opGraph, tensorMap, "Q");
+    if (status != atb::NO_ERROR) {
+      ATB_SPEED_LOG_ERROR("Attention AddQKVQuantNode Q failed, status=" << status);
+      return status;
+    }
   }
   if (param.pageAttentionParam.quantType ==
       atb::infer::PagedAttentionParam::QuantType::TYPE_QUANT_QKV_ONLINE) {
     ATB_SPEED_LOG_DEBUG("Enter AddQKVQuantNode K");
-    CHECK_OPERATION_STATUS_RETURN(
-        AddQKVQuantNode(param, opGraph, tensorMap, "K"));
+    atb::Status status = AddQKVQuantNode(param, opGraph, tensorMap, "K");
+    if (status != atb::NO_ERROR) {
+      ATB_SPEED_LOG_ERROR("Attention AddQKVQuantNode K failed, status=" << status);
+      return status;
+    }
     ATB_SPEED_LOG_DEBUG("Enter AddQKVQuantNode V");
-    CHECK_OPERATION_STATUS_RETURN(
-        AddQKVQuantNode(param, opGraph, tensorMap, "V"));
+    status = AddQKVQuantNode(param, opGraph, tensorMap, "V");
+    if (status != atb::NO_ERROR) {
+      ATB_SPEED_LOG_ERROR("Attention AddQKVQuantNode V failed, status=" << status);
+      return status;
+    }
   }
 
   const bool useOneRecDecoderFAS =
@@ -1787,16 +1864,31 @@ atb::Status Attention(const FusionAttentionParam<NormParamType> &param,
   // SelfAttention Node
   if (param.isFIA) {
     if (param.aclnnFusedInferAttnParam.inputLayout == "BSND") {
-      CHECK_OPERATION_STATUS_RETURN(AddPadNode(opGraph, param, tensorMap));
+      atb::Status status = AddPadNode(opGraph, param, tensorMap);
+      if (status != atb::NO_ERROR) {
+        ATB_SPEED_LOG_ERROR("Attention AddPadNode failed, status=" << status);
+        return status;
+      }
     }
-    CHECK_OPERATION_STATUS_RETURN(AddFIA(opGraph, param, tensorMap));
+    atb::Status status = AddFIA(opGraph, param, tensorMap);
+    if (status != atb::NO_ERROR) {
+      ATB_SPEED_LOG_ERROR("Attention AddFIA failed, status=" << status);
+      return status;
+    }
     if (param.aclnnFusedInferAttnParam.inputLayout == "BSND") {
-      CHECK_OPERATION_STATUS_RETURN(AddUnpadNode(opGraph, param, tensorMap));
+      status = AddUnpadNode(opGraph, param, tensorMap);
+      if (status != atb::NO_ERROR) {
+        ATB_SPEED_LOG_ERROR("Attention AddUnpadNode failed, status=" << status);
+        return status;
+      }
     }
   } else if (useOneRecDecoderFAS) {
     atb::Node selfAttentionNode;
-    CHECK_OPERATION_STATUS_RETURN(
-        ConstructFAScoreNode(selfAttentionNode, param, tensorMap));
+    atb::Status status = ConstructFAScoreNode(selfAttentionNode, param, tensorMap);
+    if (status != atb::NO_ERROR) {
+      ATB_SPEED_LOG_ERROR("Attention ConstructFAScoreNode failed, status=" << status);
+      return status;
+    }
     std::vector<std::string> attnOutTensorName = {
         "intermediate_self_attention", "softmax_max_out", "softmax_sum_out",
         "softmax_out_out"};
@@ -1804,12 +1896,30 @@ atb::Status Attention(const FusionAttentionParam<NormParamType> &param,
         GetTensorIdxList(tensorMap, attnOutTensorName);
     opGraph.nodes.push_back(selfAttentionNode);
   } else {
-    CHECK_OPERATION_STATUS_RETURN(AddSelfAttention(opGraph, param, tensorMap));
+    atb::Status status = AddSelfAttention(opGraph, param, tensorMap);
+    if (status != atb::NO_ERROR) {
+      ATB_SPEED_LOG_ERROR("Attention AddSelfAttention failed, status="
+          << status << ", isPrefill=" << param.isPrefill
+          << ", isFA=" << param.isFA
+          << ", calcType=" << param.selfAttentionParam.calcType
+          << ", paCalcType=" << param.pageAttentionParam.calcType
+          << ", qHeads=" << param.selfAttentionParam.headNum
+          << ", kvHeads=" << param.selfAttentionParam.kvHeadNum
+          << ", headDim=" << param.headDim);
+      return status;
+    }
   }
 
   // Dense Node
-  CHECK_OPERATION_STATUS_RETURN(
-      AddSelfOutLinearParallelNode(param, opGraph, tensorMap));
+  {
+    atb::Status status = AddSelfOutLinearParallelNode(param, opGraph, tensorMap);
+    if (status != atb::NO_ERROR) {
+      ATB_SPEED_LOG_ERROR("Attention AddSelfOutLinearParallelNode failed, status="
+          << status << ", selfAttnHasBias=" << param.selfAttnHasBias
+          << ", packQuantType=" << param.packQuantType);
+      return status;
+    }
+  }
 
   opGraph.inferShapeFunc =
       [=](const atb::SVector<atb::TensorDesc> &inTensorDescs,
