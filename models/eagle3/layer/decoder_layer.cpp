@@ -221,7 +221,7 @@ void SetFusionAttentionParam(
         fusionAttentionParam.pageAttentionParam.maskType = \
             atb::infer::PagedAttentionParam::MaskType::MASK_TYPE_NORM;
     }
-    fusionAttentionParam.selfOutLinearTensorParallelInfo = { param.rank, param.worldSize, param.backend };
+    fusionAttentionParam.selfOutLinearTensorParallelInfo = param.tensorParallelInfo;
     if (param.kvQuant) {
         fusionAttentionParam.pageAttentionParam.quantType = atb::infer::PagedAttentionParam::TYPE_DEQUANT_FUSION;
         fusionAttentionParam.pageAttentionParam.maskType = atb::infer::PagedAttentionParam::UNDEFINED;
@@ -323,7 +323,7 @@ void SetMlpParam(atb_speed::common::MlpParam<atb::infer::RmsNormParam> &mlpParam
     mlpParam.supportLora = param.supportLora;
     mlpParam.loraEnableGMM = param.loraEnableGMM;
     // c_proj(down)
-    mlpParam.downLinearTensorParallelInfo = {param.rank, param.worldSize, param.backend};
+    mlpParam.downLinearTensorParallelInfo = param.tensorParallelInfo;
     mlpParam.supportLcoc = param.supportLcoc;
     if (param.supportSwiGLU) {
         mlpParam.activationParam.activationType = atb::infer::ActivationType::ACTIVATION_SWIGLU_FORWARD;
@@ -371,10 +371,13 @@ atb::Status DecoderLayer(const DecoderLayerParam &param, atb::Operation **operat
     opGraph.name = param.isPrefill ? "Prefill_layer" : "Decoder_layer";
     std::map<std::string, uint32_t> tensorMap = ConstructTensorMap(
         param, opGraph.inTensorNum, opGraph.outTensorNum, opGraph.internalTensorNum);
-
     // process input hidden states and extra hidden states
     atb::Node inNormNode;
-    CHECK_OPERATION_STATUS_RETURN(EagleInsertNorm(inNormNode, param, tensorMap));
+    atb::Status status = EagleInsertNorm(inNormNode, param, tensorMap);
+    if (status != atb::NO_ERROR) {
+        ATB_SPEED_LOG_ERROR("Eagle3 DecoderLayer create input norm failed, status=" << status);
+        return status;
+    }
     inNormNode.inTensorIds.push_back(atb_speed::common::GetTensorIdx(tensorMap, "in_hidden_states"));
     inNormNode.inTensorIds.push_back(atb_speed::common::GetTensorIdx(tensorMap, "in_input_norm_weight"));
     if (param.normHasBias) {
@@ -384,7 +387,11 @@ atb::Status DecoderLayer(const DecoderLayerParam &param, atb::Operation **operat
     opGraph.nodes.push_back(inNormNode);
 
     atb::Node hiddenNormNode;
-    CHECK_OPERATION_STATUS_RETURN(EagleInsertNorm(hiddenNormNode, param, tensorMap));
+    status = EagleInsertNorm(hiddenNormNode, param, tensorMap);
+    if (status != atb::NO_ERROR) {
+        ATB_SPEED_LOG_ERROR("Eagle3 DecoderLayer create hidden norm failed, status=" << status);
+        return status;
+    }
     hiddenNormNode.inTensorIds.push_back(atb_speed::common::GetTensorIdx(tensorMap, "in_hidden_states_extra"));
     hiddenNormNode.inTensorIds.push_back(atb_speed::common::GetTensorIdx(tensorMap, "in_hidden_norm_weight"));
     if (param.normHasBias) {
@@ -396,10 +403,14 @@ atb::Status DecoderLayer(const DecoderLayerParam &param, atb::Operation **operat
     atb::Node catNode;
     atb::infer::ConcatParam catParam;
     catParam.concatDim = -1;
-    CHECK_OPERATION_STATUS_RETURN(atb::CreateOperation(catParam, &catNode.operation));
-    catNode.inTensorIds = {atb_speed::common::GetTensorIdxList(tensorMap, {"intermediate_innorm_out",
-    "intermediate_hiddennorm_out"})};
-    catNode.outTensorIds = {atb_speed::common::GetTensorIdx(tensorMap, "intermediate_eagle_attn_in")};
+    status = atb::CreateOperation(catParam, &catNode.operation);
+    if (status != atb::NO_ERROR) {
+        ATB_SPEED_LOG_ERROR("Eagle3 DecoderLayer create concat failed, status=" << status);
+        return status;
+    }
+    catNode.inTensorIds = atb_speed::common::GetTensorIdxList(
+        tensorMap, {"intermediate_innorm_out", "intermediate_hiddennorm_out"});
+    catNode.outTensorIds = atb_speed::common::GetTensorIdxList(tensorMap, {"intermediate_eagle_attn_in"});
     opGraph.nodes.push_back(catNode);
 
     atb::Node attentionNode;
@@ -407,20 +418,36 @@ atb::Status DecoderLayer(const DecoderLayerParam &param, atb::Operation **operat
     atb::Node mlpParallelNode;
     atb::Node mlpResidualAddNode;
 
-    CHECK_OPERATION_STATUS_RETURN(AddFusionAttention(attentionNode, param, tensorMap));
+    status = AddFusionAttention(attentionNode, param, tensorMap);
+    if (status != atb::NO_ERROR) {
+        ATB_SPEED_LOG_ERROR("Eagle3 DecoderLayer create attention failed, status=" << status);
+        return status;
+    }
     opGraph.nodes.push_back(attentionNode);
     // residual
     atb::infer::ElewiseParam addParam;
     addParam.elewiseType = atb::infer::ElewiseParam::ElewiseType::ELEWISE_ADD;
-    CHECK_OPERATION_STATUS_RETURN(atb::CreateOperation(addParam, &selfResidualAddNode.operation));
+    status = atb::CreateOperation(addParam, &selfResidualAddNode.operation);
+    if (status != atb::NO_ERROR) {
+        ATB_SPEED_LOG_ERROR("Eagle3 DecoderLayer create self residual add failed, status=" << status);
+        return status;
+    }
     selfResidualAddNode.inTensorIds = \
         atb_speed::common::GetTensorIdxList(tensorMap, {"in_hidden_states_extra", "intermediate_attn_out"});
     selfResidualAddNode.outTensorIds = atb_speed::common::GetTensorIdxList(tensorMap, {"in_hidden_states"});
     opGraph.nodes.push_back(selfResidualAddNode);
-    CHECK_OPERATION_STATUS_RETURN(AddMlp(mlpParallelNode, param, tensorMap));
+    status = AddMlp(mlpParallelNode, param, tensorMap);
+    if (status != atb::NO_ERROR) {
+        ATB_SPEED_LOG_ERROR("Eagle3 DecoderLayer create mlp failed, status=" << status);
+        return status;
+    }
     opGraph.nodes.push_back(mlpParallelNode);
     // residual
-    CHECK_OPERATION_STATUS_RETURN(atb::CreateOperation(addParam, &mlpResidualAddNode.operation));
+    status = atb::CreateOperation(addParam, &mlpResidualAddNode.operation);
+    if (status != atb::NO_ERROR) {
+        ATB_SPEED_LOG_ERROR("Eagle3 DecoderLayer create mlp residual add failed, status=" << status);
+        return status;
+    }
     mlpResidualAddNode.inTensorIds = \
         atb_speed::common::GetTensorIdxList(tensorMap, {"in_hidden_states", "intermediate_mlp_out"});
     mlpResidualAddNode.outTensorIds = atb_speed::common::GetTensorIdxList(tensorMap, {"out"});
@@ -432,7 +459,15 @@ atb::Status DecoderLayer(const DecoderLayerParam &param, atb::Operation **operat
         return atb::NO_ERROR;
     };
 
-    CHECK_OPERATION_STATUS_RETURN(atb::CreateOperation(opGraph, operation));
+    status = atb::CreateOperation(opGraph, operation);
+    if (status != atb::NO_ERROR) {
+        ATB_SPEED_LOG_ERROR("Eagle3 DecoderLayer create graph operation failed, status=" << status
+            << ", nodes=" << opGraph.nodes.size()
+            << ", inTensorNum=" << opGraph.inTensorNum
+            << ", outTensorNum=" << opGraph.outTensorNum
+            << ", internalTensorNum=" << opGraph.internalTensorNum);
+        return status;
+    }
     return atb::NO_ERROR;
 }
 
