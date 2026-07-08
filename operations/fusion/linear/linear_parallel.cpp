@@ -162,22 +162,7 @@ int64_t AddAllReduceOp(const LinearParallelParam &param, atb::GraphParam &opGrap
     allReduceParam.outDataType = param.tensorParallelInfo.outDataType;
     allReduceParam.commDomain = param.tensorParallelInfo.commDomain;
     allReduceParam.hcclComm = param.tensorParallelInfo.hcommInfo;
-    atb::Status status = atb::CreateOperation(allReduceParam, &allReduceNode.operation);
-    if (status != atb::NO_ERROR) {
-        ATB_SPEED_LOG_ERROR("LinearParallel AddAllReduceOp CreateOperation failed, status=" << status
-            << ", rank=" << allReduceParam.rank
-            << ", rankSize=" << allReduceParam.rankSize
-            << ", backend=" << allReduceParam.backend
-            << ", rankTableFile=" << allReduceParam.rankTableFile
-            << ", commDomain=" << allReduceParam.commDomain
-            << ", hcommInfoNull=" << (allReduceParam.hcclComm == nullptr)
-            << ", quantType=" << allReduceParam.quantType
-            << ", outDataType=" << allReduceParam.outDataType
-            << ", linearQuantType=" << param.fusionLinearParam.quantType
-            << ", parallelType=" << param.parallelType
-            << ", biasAfterSync=" << param.biasAfterSync);
-        return status;
-    }
+    CHECK_OPERATION_STATUS_RETURN(atb::CreateOperation(allReduceParam, &allReduceNode.operation));
     if (param.tensorParallelInfo.quantType == atb::infer::AllReduceParam::QuantType::QUANT_TYPE_PER_CHANNEL) {
         bool isQuant = param.fusionLinearParam.quantType == atb_speed::common::LinearQuantType::NO_QUANT;
         std::vector<std::string> allReduceInTensors = {
@@ -457,22 +442,7 @@ atb::Status AddFusionLinearNode(const LinearParallelParam &param,
 {
     atb::Node linearNode;
     atb_speed::common::FusionLinearParam linearParam = param.fusionLinearParam;
-    atb::Status status = FusionLinear(linearParam, &linearNode.operation);
-    if (status != atb::NO_ERROR) {
-        ATB_SPEED_LOG_ERROR("LinearParallel AddFusionLinearNode FusionLinear failed, status=" << status
-            << ", quantType=" << linearParam.quantType
-            << ", hasBias=" << linearParam.hasBias
-            << ", isBF16=" << linearParam.isBF16
-            << ", transposeType=" << linearParam.transposeType
-            << ", matmulBackend=" << linearParam.matmulBackend
-            << ", supportLora=" << linearParam.supportLora
-            << ", isPrefill=" << linearParam.isPrefill
-            << ", parallelType=" << param.parallelType
-            << ", worldSize=" << param.tensorParallelInfo.worldSize
-            << ", rank=" << param.tensorParallelInfo.rank
-            << ", backend=" << param.tensorParallelInfo.backend);
-        return status;
-    }
+    CHECK_OPERATION_STATUS_RETURN(FusionLinear(linearParam, &linearNode.operation));
     std::vector<std::string> linearInTensor = {
         param.innerTensorParallelInfo.rankIds.size() > 1 ? "intermediate_inner_tp_input" : "in_input",
         "in_weight", "in_scale", "in_offset", "in_descale", "in_bias", "in_compress_idx"
@@ -526,26 +496,7 @@ atb::Status CreateLinearParallelMC2(const LinearParallelParam &param, atb::Opera
         opGraph.nodes.push_back(addNode);
     }
 
-    atb::Status status = atb::CreateOperation(opGraph, operation);
-    if (status != atb::NO_ERROR) {
-        ATB_SPEED_LOG_ERROR("CreateLinearParallel final graph CreateOperation failed, status=" << status
-            << ", graphName=" << opGraph.name
-            << ", nodes=" << opGraph.nodes.size()
-            << ", inTensorNum=" << opGraph.inTensorNum
-            << ", outTensorNum=" << opGraph.outTensorNum
-            << ", internalTensorNum=" << opGraph.internalTensorNum
-            << ", quantType=" << param.fusionLinearParam.quantType
-            << ", hasBias=" << param.fusionLinearParam.hasBias
-            << ", biasAfterSync=" << param.biasAfterSync
-            << ", parallelType=" << param.parallelType
-            << ", worldSize=" << param.tensorParallelInfo.worldSize
-            << ", rank=" << param.tensorParallelInfo.rank
-            << ", backend=" << param.tensorParallelInfo.backend
-            << ", rankTableFile=" << param.tensorParallelInfo.rankTableFile
-            << ", commDomain=" << param.tensorParallelInfo.commDomain
-            << ", hcommInfoNull=" << (param.tensorParallelInfo.hcommInfo == nullptr));
-        return status;
-    }
+    CHECK_OPERATION_STATUS_RETURN(atb::CreateOperation(opGraph, operation));
     return atb::NO_ERROR;
 }
 
