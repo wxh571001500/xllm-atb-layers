@@ -1,5 +1,4 @@
 #include "multi_latent_attention.h"
-#include <algorithm>
 #include <cstring>
 #include <iostream>
 #include <securec.h>
@@ -14,45 +13,6 @@
 
 namespace atb_speed {
 namespace common {
-namespace {
-constexpr size_t INT32_BYTES = sizeof(int32_t);
-
-int PopulateIntArrayHostData(const std::string &opName, std::shared_ptr<AclNNTensor> &aclnnTensor)
-{
-    if (aclnnTensor == nullptr) {
-        ATB_SPEED_LOG_ERROR(opName << " aclnnTensor is null");
-        return 1;
-    }
-    if (aclnnTensor->atbTensor.desc.dtype != aclDataType::ACL_INT32) {
-        ATB_SPEED_LOG_ERROR(opName << " host seq len tensor dtype is not int32");
-        return 1;
-    }
-    if (aclnnTensor->atbTensor.hostData == nullptr) {
-        ATB_SPEED_LOG_ERROR(opName << " host seq len tensor hostData is null");
-        return 1;
-    }
-    const size_t elemNum = aclnnTensor->atbTensor.dataSize / INT32_BYTES;
-    if (elemNum == 0) {
-        ATB_SPEED_LOG_ERROR(opName << " host seq len tensor is empty");
-        return 1;
-    }
-    aclnnTensor->intArrayHostData.dataSize = elemNum;
-    aclnnTensor->intArrayHostData.data.resize(elemNum);
-    aclnnTensor->intArrayHostData.dataOri.resize(elemNum);
-    const auto *hostData = static_cast<int32_t *>(aclnnTensor->atbTensor.hostData);
-    std::transform(hostData, hostData + elemNum, aclnnTensor->intArrayHostData.data.begin(),
-                   [](int32_t value) { return static_cast<int64_t>(value); });
-    std::copy(hostData, hostData + elemNum, aclnnTensor->intArrayHostData.dataOri.begin());
-    aclnnTensor->intArrayHostData.intArray = aclCreateIntArray(
-        aclnnTensor->intArrayHostData.data.data(), elemNum);
-    if (aclnnTensor->intArrayHostData.intArray == nullptr) {
-        ATB_SPEED_LOG_ERROR(opName << " aclCreateIntArray failed");
-        return 1;
-    }
-    return 0;
-}
-}  // namespace
-
 MultiLatentAttentionOperation::MultiLatentAttentionOperation(
     const std::string &name,
     AclNNMultiLatentAttentionParam param
@@ -137,19 +97,7 @@ atb::Status MultiLatentAttentionOperation::CreateAclNNInTensorVariantPack(const 
     if (param_.maskType != AclNNMultiLatentAttentionParam::MaskType::UNDEFINED) {
         qSeqIdx++;
     }
-    int ret = PopulateIntArrayHostData(opName_, aclnnVariantPack.aclInTensors.at(this->CONTEXTLENS_INDEX));
-    if (ret != 0) {
-        ATB_SPEED_LOG_ERROR(opName_ << " Populate contextLens hostData failed");
-        return atb::ERROR_INTERNAL_ERROR;
-    }
-    if (param_.calcType == AclNNMultiLatentAttentionParam::CalcType::CALC_TYPE_SPEC) {
-        ret = PopulateIntArrayHostData(opName_, aclnnVariantPack.aclInTensors.at(qSeqIdx));
-        if (ret != 0) {
-            ATB_SPEED_LOG_ERROR(opName_ << " Populate qSeqlen hostData failed");
-            return atb::ERROR_INTERNAL_ERROR;
-        }
-    }
-    ret = this->BuildFromTensor(variantPack, this->CONTEXTLENS_INDEX, qSeqIdx, param_.calcType == AclNNMultiLatentAttentionParam::CalcType::CALC_TYPE_SPEC);
+    int ret = this->BuildFromTensor(variantPack, this->CONTEXTLENS_INDEX, qSeqIdx, param_.calcType == AclNNMultiLatentAttentionParam::CalcType::CALC_TYPE_SPEC);
     if (ret != 0) {
         ATB_SPEED_LOG_ERROR(opName_ << " BuildFromTensor failed");
         return atb::ERROR_INTERNAL_ERROR;
@@ -189,13 +137,8 @@ int MultiLatentAttentionOperation::SetAclNNWorkspaceExecutor()
     uint32_t idx = this->IN_TENSOR_NUM;
     aclTensor *mask = param_.maskType != AclNNMultiLatentAttentionParam::MaskType::UNDEFINED ?
         aclnnVariantPack.aclInTensors.at(idx++)->tensor : nullptr;
-    aclTensor *qSeqlen = nullptr;
-    aclIntArray *qSeqLenAclIntArray = nullptr;
-    if (param_.calcType == AclNNMultiLatentAttentionParam::CalcType::CALC_TYPE_SPEC) {
-        qSeqlen = aclnnVariantPack.aclInTensors.at(idx)->tensor;
-        qSeqLenAclIntArray = aclnnVariantPack.aclInTensors.at(idx)->intArrayHostData.intArray;
-        idx++;
-    }
+    aclTensor *qSeqlen = param_.calcType == AclNNMultiLatentAttentionParam::CalcType::CALC_TYPE_SPEC ?
+        aclnnVariantPack.aclInTensors.at(idx++)->tensor : nullptr;
     aclTensor *qkDescale = param_.cacheMode == AclNNMultiLatentAttentionParam::CacheMode::INT8_NZCACHE ?
         aclnnVariantPack.aclInTensors.at(idx++)->tensor : nullptr;
     aclTensor *pvDescale = param_.cacheMode == AclNNMultiLatentAttentionParam::CacheMode::INT8_NZCACHE ?
@@ -214,15 +157,6 @@ int MultiLatentAttentionOperation::SetAclNNWorkspaceExecutor()
                   << ", qDescale:" << (qkDescale != nullptr)
                   << ", kDescale:" << (pvDescale != nullptr));
 
-    aclIntArray *kvSeqLenAclIntArray =
-        aclnnVariantPack.aclInTensors.at(this->CONTEXTLENS_INDEX)->intArrayHostData.intArray;
-    if (kvSeqLenAclIntArray == nullptr ||
-        (param_.calcType == AclNNMultiLatentAttentionParam::CalcType::CALC_TYPE_SPEC &&
-         qSeqLenAclIntArray == nullptr)) {
-        ATB_SPEED_LOG_ERROR(opName_ << " seq len aclIntArray is null");
-        return 1;
-    }
-
     int ret = aclnnMultiLatentAttentionGetWorkspaceSize(
         query,
         queryRope,
@@ -239,8 +173,10 @@ int MultiLatentAttentionOperation::SetAclNNWorkspaceExecutor()
         param_.qkScale,
         param_.kvHeadNum,
         param_.maskType,
-        qSeqLenAclIntArray,
-        kvSeqLenAclIntArray,
+        param_.calcType == AclNNMultiLatentAttentionParam::CalcType::CALC_TYPE_SPEC ?
+            aclCreateIntArray(reinterpret_cast<int64_t *>(this->qSeqLen.data()), this->qSeqLen.size()) : nullptr,
+        // kv seqlen TODO
+        aclCreateIntArray(reinterpret_cast<int64_t *>(this->kvSeqLen.data()), this->kvSeqLen.size()),
         param_.calcType == AclNNMultiLatentAttentionParam::CalcType::CALC_TYPE_RING,
         aclnnVariantPack.aclOutTensors.at(DIM0)->tensor,
         outputNum > 1 ? aclnnVariantPack.aclOutTensors.at(DIM1)->tensor : nullptr,
