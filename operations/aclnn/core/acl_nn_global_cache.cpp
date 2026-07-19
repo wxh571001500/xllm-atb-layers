@@ -16,8 +16,10 @@
 #include <sstream>
 #include "atb_speed/log.h"
 #include "atb_speed/utils/operation_util.h"
+#include "atb_speed/utils/singleton.h"
 #include "operations/aclnn/utils/utils.h"
 #include "acl_nn_global_cache.h"
+#include "executor_manager.h"
 
 namespace atb_speed {
 namespace common {
@@ -89,6 +91,8 @@ atb::Status AclNNGlobalCache::UpdateGlobalCache(std::string opName, std::shared_
     if (it == this->aclnnGlobalCache_.end()) {
         // translatedopNametranslatedCachetranslated
         ATB_SPEED_LOG_DEBUG("Plugin Op Cache: Op name[" << opName << "] not found in AclNNGlobalCache, add one");
+        // Keep the executor alive after all operation-local caches switch shape.
+        GetSingleton<ExecutorManager>().IncreaseReference(cache->aclExecutor);
         this->aclnnGlobalCache_[opName] = {cache};
         return atb::NO_ERROR;
     }
@@ -97,6 +101,7 @@ atb::Status AclNNGlobalCache::UpdateGlobalCache(std::string opName, std::shared_
     // Cachetranslated
     if (opGlobalCacheList.size() < this->globalCacheCountMax_) {
         ATB_SPEED_LOG_DEBUG("Plugin Op Cache: Op name[" << opName << "] global cache is not full, add one");
+        GetSingleton<ExecutorManager>().IncreaseReference(cache->aclExecutor);
         opGlobalCacheList.push_back(cache);
         return atb::NO_ERROR;
     }
@@ -104,7 +109,14 @@ atb::Status AclNNGlobalCache::UpdateGlobalCache(std::string opName, std::shared_
     // Cachetranslated
     ATB_SPEED_LOG_DEBUG("Plugin Op Cache: Op name["
                   << opName << "] global cache is full, update index " << nextUpdateIndex_);
-    opGlobalCacheList[nextUpdateIndex_] = cache;
+    std::shared_ptr<AclNNOpCache> &oldCache = opGlobalCacheList[nextUpdateIndex_];
+    if (oldCache != cache) {
+        if (oldCache != nullptr) {
+            oldCache->Destroy();
+        }
+        GetSingleton<ExecutorManager>().IncreaseReference(cache->aclExecutor);
+        oldCache = cache;
+    }
     CHECK_PARAM_NE(globalCacheCountMax_, 0);
     nextUpdateIndex_ = (nextUpdateIndex_ + 1) % globalCacheCountMax_;
     return atb::NO_ERROR;

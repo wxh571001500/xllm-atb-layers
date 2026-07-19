@@ -57,7 +57,9 @@ target_include_directories(xllm_atb_layers PRIVATE
   $ENV{PYTORCH_NPU_INSTALL_PATH}/include
   $ENV{NPU_HOME_PATH}/include
   $ENV{ATB_HOME_PATH}/include
-  $ENV{NPU_HOME_PATH}/opp/vendors/xllm/op_api/include/ 
+  $ENV{NPU_HOME_PATH}/opp/vendors/xllm/op_api/include/
+  $ENV{NPU_HOME_PATH}/opp/vendors/custom_xllm_math/op_api/include/
+  ${PROJECT_SOURCE_DIR}/third_party/xllm_ops
 )
 ## Adapt to the modification in DeekSeekV4 where the installation path of xllm_ops has been changed to custom_xllm_math 
 if(EXISTS "$ENV{NPU_HOME_PATH}/opp/vendors/custom_xllm_math/op_api/include/aclnnop")

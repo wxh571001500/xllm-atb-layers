@@ -18,6 +18,7 @@
 #include <memory>
 #include "operations/aclnn/ops/argsort_operation.h"
 #include "operations/aclnn/ops/grouped_matmul_operation.h"
+#include "operations/aclnn/ops/dispatch_ffn_combine_operation.h"
 #include "operations/fusion/moe/moe_mlp.h"
 #include "data_preparation.h"
 #include "all_to_all_meta.h"
@@ -29,6 +30,10 @@
 
 namespace atb_speed {
 namespace common {
+
+namespace {
+constexpr int64_t kDispatchFfnCombineMaxOutputSize = 65536;
+} // namespace
 
 std::map<std::string, std::vector<std::string>> GetDynamicEpMoEInTensorCandidates()
 {
@@ -60,7 +65,7 @@ std::map<std::string, std::vector<std::string>> GetDynamicEpMoEInterTensorCandid
             "intermediate_shuffle_idx_2", "intermediate_expert_shuffle_idx_1",
             "intermediate_group_count", "intermediate_shuffle_weight", "intermediate_recv_hiddenstatus",
             "intermediate_recv_selected_experts", "intermediate_experts_weight",
-            "intermediate_experts_weight_cast", "intermediate_moe_output"}
+            "intermediate_moe_output"}
         },
     };
     return dynamicEpMoEInterTensorCandidates;
@@ -70,7 +75,7 @@ std::map<std::string, std::vector<std::string>> GetDynamicEpMoEOutTensorCandidat
 {
     std::map<std::string, std::vector<std::string>> dynamicEpMoEOutTensorCandidates = {
         {"default", {
-            "out_hiddenstates"}
+            "out_hidden_states"}
         },
     };
     return dynamicEpMoEOutTensorCandidates;
@@ -92,7 +97,13 @@ std::map<std::string, uint32_t> ConstructDynamicEpTensorMap(
             AddTensorToList(dynamicEpMoEInTensorCandidates, "dynamic_ep", inTensorList);
         }
     }
-    if (param.hasMoeEp && param.isDynamicEp && !param.enableMoeDistribute && !param.enableLcocAll2All) {
+    if (param.enableDispatchFfnCombine && param.isDynamicEp) {
+        interTensorList.push_back("intermediate_dispatch_probs_fp32");
+        if (!param.enableExpertCumSumOutput) {
+            interTensorList.push_back("intermediate_expert_token_nums");
+        }
+    } else if (param.hasMoeEp && param.isDynamicEp && !param.enableMoeDistribute &&
+        !param.enableLcocAll2All) {
         AddTensorToList(dynamicEpMoEInterTensorCandidates, "default", interTensorList);
     }
     AddTensorToList(dynamicEpMoEOutTensorCandidates, "default", outTensorList);
@@ -141,12 +152,73 @@ atb::Status CreateFusedAllToAllMlp(std::map<std::string, uint32_t> &tensorMap, c
         GetTensorIdx(tensorMap, "in_expert_weight"),
         GetTensorIdx(tensorMap, "in_moe_idx"),
     };
-    expertNode.outTensorIds = {GetTensorIdx(tensorMap, "out_hiddenstates")};
+    expertNode.outTensorIds = {GetTensorIdx(tensorMap, "out_hidden_states")};
  
     ATB_SPEED_LOG_DEBUG("Expert Group calculation success");
     return atb::NO_ERROR;
 }
- 
+
+atb::Status CreateDispatchFfnCombineProbsCast(std::map<std::string, uint32_t> &tensorMap,
+                                               size_t &nodeId,
+                                               atb::GraphParam &opGraph)
+{
+    auto &node = opGraph.nodes.at(nodeId++);
+    atb::infer::ElewiseParam castParam;
+    castParam.elewiseType = atb::infer::ElewiseParam::ElewiseType::ELEWISE_CAST;
+    castParam.outTensorType = ACL_FLOAT;
+    CHECK_OPERATION_STATUS_RETURN(CreateOperation(castParam, &node.operation));
+    node.inTensorIds = {GetTensorIdx(tensorMap, "in_expert_weight")};
+    node.outTensorIds = {GetTensorIdx(tensorMap, "intermediate_dispatch_probs_fp32")};
+    node.inTensorChunks.resize(node.inTensorIds.size());
+    return atb::NO_ERROR;
+}
+
+// Dispatch+FFN+combine fusion (aclnnDispatchFFNCombine).
+// Inputs: x, weight1, weight2, expert_ids, scale1, scale2, probs
+// Outputs: output, expert_token_nums
+atb::Status CreateDispatchFfnCombineNode(std::map<std::string, uint32_t> &tensorMap,
+                                          const DynamicEpMoEParam &param,
+                                          size_t &nodeId,
+                                          atb::GraphParam &opGraph)
+{
+    auto &node = opGraph.nodes.at(nodeId++);
+    DispatchFfnCombineParam opParam;
+    opParam.epRankSize = param.moeEpSize;
+    opParam.epRankId = param.moeEpRank;
+    opParam.maxOutputSize = kDispatchFfnCombineMaxOutputSize;
+    opParam.swigluLimit = 0.0;  // 0.0: no saturation limit
+    opParam.localMoeExpertNum = param.numOfDeviceExperts;
+    opParam.epCommName = param.moeEpDomain;
+
+    node.operation = new atb_speed::common::DispatchFfnCombineOperation("DispatchFfnCombine", opParam);
+
+    // Input tensor layout (aligned with sparse_moe's outputs):
+    //   0: in_hiddenstatus
+    //   1: in_mlp_gateup_weight_expert (weight1: gate/up)
+    //   2: in_mlp_down_weight_expert (weight2: down)
+    //   3: in_selected_experts (expert_ids)
+    //   4: in_mlp_gateup_scale_expert (scale1)
+    //   5: in_mlp_down_scale_expert (scale2)
+    //   6: in_expert_weight (probs/expert routing probabilities)
+    node.inTensorIds = {
+        GetTensorIdx(tensorMap, "in_hiddenstatus"),
+        GetTensorIdx(tensorMap, "in_mlp_gateup_weight_expert"),
+        GetTensorIdx(tensorMap, "in_mlp_down_weight_expert"),
+        GetTensorIdx(tensorMap, "in_selected_experts"),
+        GetTensorIdx(tensorMap, "in_mlp_gateup_scale_expert"),
+        GetTensorIdx(tensorMap, "in_mlp_down_scale_expert"),
+        GetTensorIdx(tensorMap, "intermediate_dispatch_probs_fp32")
+    };
+    node.outTensorIds = {
+        GetTensorIdx(tensorMap, "out_hidden_states"),
+        GetTensorIdx(tensorMap, param.enableExpertCumSumOutput ?
+            "out_gmm_cumsum_list" : "intermediate_expert_token_nums")
+    };
+    node.inTensorChunks.resize(node.inTensorIds.size());
+    ATB_SPEED_LOG_DEBUG("CreateDispatchFfnCombineNode success");
+    return atb::NO_ERROR;
+}
+
 
 atb::Status CreateDataPreparation(std::map<std::string, uint32_t> &tensorMap,
     const DynamicEpMoEParam &param, size_t &nodeId, atb::GraphParam &opGraph)
@@ -319,7 +391,7 @@ atb::Status CreateMoeMlp(std::map<std::string, uint32_t> &tensorMap, const Dynam
     atb_speed::common::CreateMoeMlpOperation(mlpExpertParam, &expertNode.operation);
     expertNode.outTensorIds = {GetTensorIdx(tensorMap,
         (param.hasMoeEp && param.isDynamicEp && !param.enableMoeDistribute) ? \
-        "intermediate_moe_output" : "out_hiddenstates")};
+        "intermediate_moe_output" : "out_hidden_states")};
     if (param.enableExpertCumSumOutput) {
         expertNode.outTensorIds.push_back(GetTensorIdx(tensorMap, "out_gmm_cumsum_list"));
     }
@@ -376,7 +448,7 @@ atb::Status CreateShuffleWeight(std::map<std::string, uint32_t> &tensorMap,
     elewiseParam.elewiseType = atb::infer::ElewiseParam::ElewiseType::ELEWISE_MUL;
     CHECK_OPERATION_STATUS_RETURN(CreateOperation(elewiseParam, &node.operation));
 
-    node.inTensorIds = {GetTensorIdx(tensorMap, "intermediate_experts_weight_cast"),
+    node.inTensorIds = {GetTensorIdx(tensorMap, "intermediate_experts_weight"),
         GetTensorIdx(tensorMap, "intermediate_shuffle_weight")};
     node.outTensorIds = {GetTensorIdx(tensorMap, "intermediate_shuffle_weight")};
 
@@ -430,7 +502,7 @@ atb::Status CreateAllToAllCollect(std::map<std::string, uint32_t> &tensorMap, co
                                        GetTensorIdx(tensorMap, "intermediate_shuffle_weight"),
                                        GetTensorIdx(tensorMap, "intermediate_shuffle_idx_1"),
                                        GetTensorIdx(tensorMap, "intermediate_valid_idx")};
-    allToAllCollectNode.outTensorIds = {GetTensorIdx(tensorMap, "out_hiddenstates")};
+    allToAllCollectNode.outTensorIds = {GetTensorIdx(tensorMap, "out_hidden_states")};
     allToAllCollectNode.inTensorChunks.resize(allToAllCollectNode.inTensorIds.size());
     ATB_SPEED_LOG_DEBUG("allToAllCollectNode calculation success");
     return atb::NO_ERROR;
@@ -445,13 +517,24 @@ atb::Status CreateDynamicEpMoEOperation(const DynamicEpMoEParam &param, atb::Ope
         param, opGraph.inTensorNum, opGraph.outTensorNum, opGraph.internalTensorNum);
 
     uint64_t nodeCount = 1;
-    if (param.hasMoeEp && param.isDynamicEp && !param.enableMoeDistribute && !param.enableLcocAll2All) {
-        nodeCount = 10;
+    if (param.enableDispatchFfnCombine && param.isDynamicEp) {
+        nodeCount = 2;
+    } else if (param.hasMoeEp && param.isDynamicEp && !param.enableMoeDistribute &&
+        !param.enableLcocAll2All) {
+        // 9 (was 10): dropped CreateExpertsWeightCast. intermediate_experts_weight
+        // arrives already in compute dtype (BF16) from the upstream sparse_moe
+        // cast, so the node[6] BF16->BF16 ELEWISE_CAST was a no-op with no kernel
+        // on this SoC (CastBF16BF16Kernel not found). The downstream MUL now reads
+        // intermediate_experts_weight directly.
+        nodeCount = 9;
     }
     opGraph.nodes.resize(nodeCount);
 
     size_t nodeId = 0;
-    if (param.enableLcocAll2All && param.isDynamicEp) {
+    if (param.enableDispatchFfnCombine && param.isDynamicEp) {
+        CHECK_OPERATION_STATUS_RETURN(CreateDispatchFfnCombineProbsCast(tensorMap, nodeId, opGraph));
+        CHECK_OPERATION_STATUS_RETURN(CreateDispatchFfnCombineNode(tensorMap, param, nodeId, opGraph));
+    } else if (param.enableLcocAll2All && param.isDynamicEp) {
         // alltoall GMM operation
         /*
             1. InitRoutingQuant
@@ -472,7 +555,8 @@ atb::Status CreateDynamicEpMoEOperation(const DynamicEpMoEParam &param, atb::Ope
         CHECK_OPERATION_STATUS_RETURN(CreateAllToAllDispatch(tensorMap, param, nodeId, opGraph));
         CHECK_OPERATION_STATUS_RETURN(CreateMoeMlp(tensorMap, param, nodeId, opGraph));
 
-        CHECK_OPERATION_STATUS_RETURN(CreateExpertsWeightCast(tensorMap, param, nodeId, opGraph));
+        // Dropped CreateExpertsWeightCast (BF16->BF16 no-op, no kernel on this
+        // SoC). MUL below reads intermediate_experts_weight directly.
         CHECK_OPERATION_STATUS_RETURN(CreateShuffleWeight(tensorMap, nodeId, opGraph));
         CHECK_OPERATION_STATUS_RETURN(CreateShuffleIdxDE2(tensorMap, nodeId, opGraph));  // translated
         CHECK_OPERATION_STATUS_RETURN(CreateAllToAllCollect(tensorMap, param, nodeId, opGraph));

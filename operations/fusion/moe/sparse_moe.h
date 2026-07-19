@@ -91,6 +91,7 @@ struct SparseMoeParam {
     std::string mlpTpDomain = "";  /// The communication domain of tensor parallelism of FFN
     std::string mlpTpRankTableFile = "";  /// The rankTableFile for the device in the communication domain
     bool enableMoeDistribute = false; /// A flag indicating whether to use moe distribute fusion operator
+    bool enableDispatchFfnCombine = false; /// Use single-op fused dispatch+ffn+combine (aligns with vLLM MC2 mode=1)
     bool enableExpertCumSumOutput = false; /// A flag indicating whether output ExpertCumSum
     bool enableGatingDp = false;  /// A flag indicating whether gate dp
     bool enableGatingShift = false;  /// A flag indicating whether gate need shift

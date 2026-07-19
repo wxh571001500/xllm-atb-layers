@@ -33,8 +33,6 @@
 #include "operations/aclnn/ops/moe_fused_reducesum_div_operation.h"
 #include "atb_speed/base/event_manager.h"
 
-DECLARE_bool(enable_atb_comm_multiprocess);
-
 namespace atb_speed {
 namespace common {
 
@@ -723,6 +721,7 @@ atb::Status SetDynamicExpertParam(atb_speed::common::DynamicEpMoEParam &dynamicE
     dynamicExpertParam.enableExpertCumSumOutput = param.enableExpertCumSumOutput;
     dynamicExpertParam.enableGatingDp = param.enableGatingDp;
     dynamicExpertParam.enableDispatchCombineV2 = param.enableDispatchCombineV2;
+    dynamicExpertParam.enableDispatchFfnCombine = param.enableDispatchFfnCombine;
     dynamicExpertParam.enableLcocAll2All = param.enableLcocAll2All;
     dynamicExpertParam.lcclMoeEpDomain = param.lcclMoeEpDomain;
     dynamicExpertParam.lcclMoeEpHcclComm = param.lcclMoeEpHcclComm;
@@ -875,8 +874,9 @@ atb::Status GetoutTensorIdx(
     }
     atb::Node expertNode;
     atb_speed::common::DynamicEpMoEParam dynamicExpertParam;
-    SetDynamicExpertParam(dynamicExpertParam, param);
-    atb_speed::common::CreateDynamicEpMoEOperation(dynamicExpertParam, &expertNode.operation);
+    CHECK_OPERATION_STATUS_RETURN(SetDynamicExpertParam(dynamicExpertParam, param));
+    CHECK_OPERATION_STATUS_RETURN(
+        atb_speed::common::CreateDynamicEpMoEOperation(dynamicExpertParam, &expertNode.operation));
     expertNode.outTensorIds = {GetTensorIdx(tensorMap, "out_moe_rout")};
     if (param.enableExpertCumSumOutput) {
         expertNode.outTensorIds.push_back(GetTensorIdx(tensorMap, "out_gmm_cumsum_list"));
@@ -1031,9 +1031,6 @@ atb::Status SetTPAllGatherNode(std::map<std::string, uint32_t> tensorMap, const 
     allGatherParam.commDomain = param.mlpTpDomain;
     allGatherParam.rankTableFile = param.mlpTpRankTableFile;
     allGatherParam.hcclComm = param.hcclTpComm;
-    if (!FLAGS_enable_atb_comm_multiprocess) {
-          allGatherParam.commMode = atb::infer::CommMode::COMM_MULTI_THREAD;
-    }
     CreateOperation(allGatherParam, &allGatherNode.operation);
 
     bool skipCast = !param.enableFusedTopk && !param.enableMoeDistribute && (param.processLogits != "none") && (!param.enableFusedTopk || param.enableGatingDp) && !param.mixSharedRouting;

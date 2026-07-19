@@ -811,7 +811,7 @@ int64_t SetAllGather(atb::GraphParam &opGraph, const DecoderLayerParam &param,
 
     CHECK_OPERATION_STATUS_RETURN(atb::CreateOperation(allGatherParam, &allGatherNode.operation));
     allGatherNode.inTensorIds = atb_speed::common::GetTensorIdxList(
-        tensorMap, {is_auxiliary ? "intermediate_selfattention_norm_out_partial_auxiliary" : 
+        tensorMap, {is_auxiliary ? "intermediate_selfattention_norm_out_partial_auxiliary" :
             "intermediate_selfattention_norm_out_partial"});
     allGatherNode.outTensorIds = atb_speed::common::GetTensorIdxList(
         tensorMap, {is_auxiliary ? "intermediate_dp_attn_out_all_with_padding_auxiliary" : 
@@ -1076,7 +1076,15 @@ atb::Status SetSparseMoeParam(atb_speed::common::SparseMoeParam &sparseMoeParam,
     sparseMoeParam.numOfRedundantExpert = param.numOfRedundantExpert;
     sparseMoeParam.numDanglingSharedExperts = param.numDanglingSharedExperts;
     sparseMoeParam.maxDecodeDpTokenSize = param.maxDecodeDpTokenSize;
-    sparseMoeParam.enableMoeDistribute = !param.isPrefill && param.enableAllToAllMC2 && param.isDynamicEp;
+    // Align with vLLM MC2 mode selection:
+    // - enableAllToAllMC2 == true → EP parallel degree = 2 (MC2 = Multi-Card-2)
+    // - mode 1: use dispatch_ffn_combine (single-op fusion)
+    sparseMoeParam.enableDispatchFfnCombine =
+        !param.isDenseLayer && !param.isPrefill && param.isDynamicEp &&
+        param.enableAllToAllMC2 &&
+        sparseMoeParam.packQuantType == atb_speed::common::PackQuantType::ALL_W8A8_DYNAMIC;
+    sparseMoeParam.enableMoeDistribute = false;  // Legacy multi-node path, superseded by dispatch_ffn_combine
+    sparseMoeParam.enableLcocAll2All = false;   // Legacy LCOC path, disabled
     sparseMoeParam.enableDispatchCombineV2 = param.enableDispatchCombineV2;
     sparseMoeParam.enableGatingDp = param.enableGatingDp && param.isPrefill;  // h3p gatingdp for moe
     sparseMoeParam.enableGatingShift = param.enableGatingDp && !param.isPrefill;  // h3p gatingshift for decode
@@ -1483,7 +1491,7 @@ atb::Status SetTPAllGatherNode(atb::GraphParam &opGraph, const DecoderLayerParam
 
     allGatherNode.inTensorIds = atb_speed::common::GetTensorIdxList(tensorMap,
         {param.hasAttnComm ?
-            (is_auxiliary ? "intermediate_mlp_out_auxiliary" : "intermediate_mlp_out") : 
+            (is_auxiliary ? "intermediate_mlp_out_auxiliary" : "intermediate_mlp_out") :
             (is_auxiliary ? "intermediate_moe_out_with_shared_with_padding_auxiliary" : "intermediate_moe_out_with_shared_with_padding")});
     allGatherNode.outTensorIds = atb_speed::common::GetTensorIdxList(tensorMap, 
         {is_auxiliary ? "intermediate_mlp_out_all_auxiliary" : "intermediate_mlp_out_all"});

@@ -77,6 +77,7 @@ struct DynamicEpMoEParam {
     uint32_t numOfRedundantExpert = 0;
     bool enableIndexGmm = false;
     bool enableLcocAll2All = false;
+    bool enableDispatchFfnCombine = false;  // Use single-op fused dispatch+ffn+combine (aligns with vLLM MC2 mode=1)
     std::string routingMethod = "";
 
     std::string lcclMoeEpDomain = "";
