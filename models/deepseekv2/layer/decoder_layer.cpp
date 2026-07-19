@@ -16,6 +16,7 @@
 
 #include <gflags/gflags.h>
 #include <glog/logging.h>
+#include <cstdlib>
 #include "operations/fusion/linear/linear.h"
 #include "operations/fusion/linear/linear_parallel.h"
 #include "operations/fusion/norm/norm_linear.h"
@@ -1590,6 +1591,27 @@ atb::Status CalculateCommType(DecoderLayerParam &param)
         << " . attnAllGather is " << param.attnAllGather
         << " . ffnAllreduce is " << param.ffnAllreduce << " . ffnReduceScatter is " << param.ffnReduceScatter
         << " . ffnAllGather is " << param.ffnAllGather);
+    // TEMP(phase0 diag): surface the real comm-type flags once for prefill and
+    // once for decode so we know which path decode runs before rewiring.
+    static bool comm_type_logged_prefill = false;
+    static bool comm_type_logged_decode = false;
+    bool& comm_type_logged = param.isPrefill ? comm_type_logged_prefill : comm_type_logged_decode;
+    if (!comm_type_logged) {
+        comm_type_logged = true;
+        ATB_SPEED_LOG_INFO("CalculateCommType[phase0]"
+            << " isPrefill=" << param.isPrefill
+            << " attnStreamNum=" << param.attnStreamNum << " ffnStreamNum=" << param.ffnStreamNum
+            << " outStreamNum=" << outStreamNum
+            << " ATTN_TP_enabled=" << param.mapping.Get(base::ATTN_TP).IsEnabled()
+            << " attnAllreduce=" << param.attnAllreduce
+            << " attnReduceScatter=" << param.attnReduceScatter
+            << " attnAllGather=" << param.attnAllGather
+            << " ffnAllreduce=" << param.ffnAllreduce
+            << " ffnReduceScatter=" << param.ffnReduceScatter
+            << " ffnAllGather=" << param.ffnAllGather
+            << " isDynamicEp=" << param.isDynamicEp
+            << " enableAllToAllMC2=" << param.enableAllToAllMC2);
+    }
     return atb::NO_ERROR;
 }
 
@@ -1927,6 +1949,38 @@ atb::Status DecoderLayer(DecoderLayerParam &param, atb::Operation **operation)
     opGraph.name = param.isPrefill ? "Prefill_layer" : "Decoder_layer";
     CalculateDataPartition(param);
     CalculateCommType(param);
+    // XLLM_FORCE_MOE_DISTRIBUTE: Phase0 revealed actual decode path is attnAllreduce=1
+    // (multi-stream attnStreamNum=4), NOT the attnReduceScatter path profiling hinted.
+    // The slow allgatherAicpu/reduce_scatterAicpu in profiling likely come from FFN
+    // or another module, not the attention DP bridge (which is already off by default).
+    // Error 12 (MoeMlp node[0] setup fail) when hasAttnComm/hasFfnComm forced to false
+    // suggests multi-stream mode has shape/padding dependencies on those flags.
+    //
+    // TEMPORARY NO-OP: keep original flags, validate profiling attribution first.
+    // The attnAllreduce=1 path already keeps o_proj machine-local (ATTN_TP=8, fast).
+    // If the bottleneck is elsewhere (FFN allreduce? shared-expert?), forcing comm
+    // flags off won't help and breaks the graph. Need to re-profile with this build
+    // to confirm where the 1.2s allgatherAicpu actually originates before rewiring.
+    {
+        const char* force_md = std::getenv("XLLM_FORCE_MOE_DISTRIBUTE");
+        const bool moe_distribute_forced =
+            force_md != nullptr && std::string(force_md) == "1";
+        const bool moe_distribute_active =
+            !param.isPrefill && param.enableAllToAllMC2 && param.isDynamicEp;
+        if (moe_distribute_forced && moe_distribute_active) {
+            // NO-OP for now — attnAllreduce=1 already, other flags=0 already.
+            // Uncomment below ONLY after confirming profiling shows these specific
+            // flags cause the bottleneck (currently unclear attribution).
+            // param.attnAllreduce = param.mapping.Get(base::ATTN_TP).IsEnabled();
+            // param.attnReduceScatter = false;
+            // param.attnAllGather = false;
+            // param.ffnAllreduce = false;
+            // param.ffnReduceScatter = false;
+            // param.ffnAllGather = false;
+            // param.hasAttnComm = false;
+            // param.hasFfnComm = false;
+        }
+    }
     param.enableQkvdownDp = param.enableQkvdownDp && param.ffnAllGather;
     CHECK(!(param.skipTopk || param.outputTopk) || param.index_n_heads > 0)
         << "DSA top-k sharing requires index_n_heads > 0.";

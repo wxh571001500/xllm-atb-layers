@@ -60,7 +60,7 @@ std::map<std::string, std::vector<std::string>> GetDynamicEpMoEInterTensorCandid
             "intermediate_shuffle_idx_2", "intermediate_expert_shuffle_idx_1",
             "intermediate_group_count", "intermediate_shuffle_weight", "intermediate_recv_hiddenstatus",
             "intermediate_recv_selected_experts", "intermediate_experts_weight",
-            "intermediate_experts_weight_cast", "intermediate_moe_output"}
+            "intermediate_moe_output"}
         },
     };
     return dynamicEpMoEInterTensorCandidates;
@@ -376,7 +376,7 @@ atb::Status CreateShuffleWeight(std::map<std::string, uint32_t> &tensorMap,
     elewiseParam.elewiseType = atb::infer::ElewiseParam::ElewiseType::ELEWISE_MUL;
     CHECK_OPERATION_STATUS_RETURN(CreateOperation(elewiseParam, &node.operation));
 
-    node.inTensorIds = {GetTensorIdx(tensorMap, "intermediate_experts_weight_cast"),
+    node.inTensorIds = {GetTensorIdx(tensorMap, "intermediate_experts_weight"),
         GetTensorIdx(tensorMap, "intermediate_shuffle_weight")};
     node.outTensorIds = {GetTensorIdx(tensorMap, "intermediate_shuffle_weight")};
 
@@ -446,7 +446,12 @@ atb::Status CreateDynamicEpMoEOperation(const DynamicEpMoEParam &param, atb::Ope
 
     uint64_t nodeCount = 1;
     if (param.hasMoeEp && param.isDynamicEp && !param.enableMoeDistribute && !param.enableLcocAll2All) {
-        nodeCount = 10;
+        // 9 (was 10): dropped CreateExpertsWeightCast. intermediate_experts_weight
+        // arrives already in compute dtype (BF16) from the upstream sparse_moe
+        // cast, so the node[6] BF16->BF16 ELEWISE_CAST was a no-op with no kernel
+        // on this SoC (CastBF16BF16Kernel not found). The downstream MUL now reads
+        // intermediate_experts_weight directly.
+        nodeCount = 9;
     }
     opGraph.nodes.resize(nodeCount);
 
@@ -472,7 +477,8 @@ atb::Status CreateDynamicEpMoEOperation(const DynamicEpMoEParam &param, atb::Ope
         CHECK_OPERATION_STATUS_RETURN(CreateAllToAllDispatch(tensorMap, param, nodeId, opGraph));
         CHECK_OPERATION_STATUS_RETURN(CreateMoeMlp(tensorMap, param, nodeId, opGraph));
 
-        CHECK_OPERATION_STATUS_RETURN(CreateExpertsWeightCast(tensorMap, param, nodeId, opGraph));
+        // Dropped CreateExpertsWeightCast (BF16->BF16 no-op, no kernel on this
+        // SoC). MUL below reads intermediate_experts_weight directly.
         CHECK_OPERATION_STATUS_RETURN(CreateShuffleWeight(tensorMap, nodeId, opGraph));
         CHECK_OPERATION_STATUS_RETURN(CreateShuffleIdxDE2(tensorMap, nodeId, opGraph));  // translated
         CHECK_OPERATION_STATUS_RETURN(CreateAllToAllCollect(tensorMap, param, nodeId, opGraph));

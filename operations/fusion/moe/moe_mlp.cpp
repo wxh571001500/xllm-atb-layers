@@ -839,6 +839,9 @@ atb::Status CreateMoeDistributeDispatch(
     if (param.enableDispatchCombineV2) {
         atb_speed::common::MoeDistributeDispatchV2Param dispatchParam;
         SetMoeDistributeDispatchParam(dispatchParam, param);
+        // NOTE: vLLM sets commAlg="hierarchy" (token_dispatcher.py:221), but it
+        // causes xLLM to hang in multi-request scenarios. Keeping default for now.
+        // dispatchParam.commAlg = "hierarchy";
         moeDistributeDispatchNode.operation = new atb_speed::common::MoeDistributeDispatchV2Operation(
                 std::string("MoeDistributeDispatchV2") + std::to_string(param.packQuantType), dispatchParam);
     } else {

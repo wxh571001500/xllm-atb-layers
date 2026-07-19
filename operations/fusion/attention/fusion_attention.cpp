@@ -1068,7 +1068,9 @@ AddSelfOutLinearParallelNode(const FusionAttentionParam<NormParamType> &param,
                              std::map<std::string, uint32_t> &tensorMap) {
   atb::Node selfOutLinearParallelNode;
   atb_speed::common::LinearParallelParam selfOutLinearParam;
-  if (param.enableFlashComm) {
+  // PERF: Force ROW_PARALLEL (all_reduce) to match vLLM's performance
+  // enableFlashComm uses slow REDUCE_SCATTER (2368us/call) vs ROW_PARALLEL (fast)
+  if (false && param.enableFlashComm) {
     selfOutLinearParam.parallelType = atb_speed::common::REDUCE_SCATTER;
   } else {
     selfOutLinearParam.parallelType = atb_speed::common::ROW_PARALLEL;
