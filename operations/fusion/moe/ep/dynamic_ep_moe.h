@@ -53,6 +53,7 @@ struct DynamicEpMoEParam {
     bool enableAtlasGMMFused = false;
     bool enableFusedTopk = false;
     bool enableDispatchCombineV2 = false; /// A flag indicating whether to use dispatch_v2 and combine_v2
+    bool enableDispatchGmmCombineDecode = false;
     atb_speed::common::OpBackend swigluBackend = atb_speed::common::OpBackend::ATB;
     std::string backend = "hccl";
     HcclComm hcclComm = nullptr;

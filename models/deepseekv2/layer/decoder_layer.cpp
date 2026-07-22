@@ -1079,6 +1079,7 @@ atb::Status SetSparseMoeParam(atb_speed::common::SparseMoeParam &sparseMoeParam,
     sparseMoeParam.maxDecodeDpTokenSize = param.maxDecodeDpTokenSize;
     sparseMoeParam.enableMoeDistribute = !param.isPrefill && param.enableAllToAllMC2 && param.isDynamicEp;
     sparseMoeParam.enableDispatchCombineV2 = param.enableDispatchCombineV2;
+    sparseMoeParam.enableDispatchGmmCombineDecode = param.enableDispatchGmmCombineDecode;
     sparseMoeParam.enableGatingDp = param.enableGatingDp && param.isPrefill;  // h3p gatingdp for moe
     sparseMoeParam.enableGatingShift = param.enableGatingDp && !param.isPrefill;  // h3p gatingshift for decode
     sparseMoeParam.enableGatingOverlap = sparseMoeParam.enableGatingDp &&

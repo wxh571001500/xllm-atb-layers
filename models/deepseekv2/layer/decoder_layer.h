@@ -106,6 +106,7 @@ public:
     bool maskfree = true;
 
     bool enableAllToAllMC2 = false;
+    bool enableDispatchGmmCombineDecode = false;
     HcclComm hcclComm = nullptr;
     bool enableGatherPreNorm = false;
     bool enableEPWB = false;

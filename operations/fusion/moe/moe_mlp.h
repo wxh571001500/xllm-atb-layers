@@ -55,6 +55,7 @@ struct MoeMlpParam {
     bool enableCVOverlap = false; /// A flag indicating whether the model use cube and vector parallel
     bool hasMoeEp = false; /// A flag indicating whether the model uses expert parallelism
     bool enableDispatchCombineV2 = false; /// A flag indicating whether to use dispatch_v2 and combine_v2
+    bool enableDispatchGmmCombineDecode = false;
     int packQuantType = atb_speed::common::PackQuantType::ALL_FP;   /// The quantization type of the packed weights
     /// The quantization type used to facilitate the calculation of the quantization type of the linear operation
     int denseQuantType = atb_speed::common::PackQuantType::PACK_QUANT_UNDEFINED;

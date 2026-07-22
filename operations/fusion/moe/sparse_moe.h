@@ -75,6 +75,7 @@ struct SparseMoeParam {
     int denseQuantType = atb_speed::common::PackQuantType::PACK_QUANT_UNDEFINED;
     bool useStdNorm = false;  /// A flag indicating whether the model utilizes std to normalize expert scores
     bool enableDispatchCombineV2 = false; /// A flag indicating whether to use dispatch_v2 and combine_v2
+    bool enableDispatchGmmCombineDecode = false;
 
     std::string backend = "hccl";  /// The communication used in the backend
     std::string mlpTpBackend = "hccl";  /// The communication used in the mlp tp backend

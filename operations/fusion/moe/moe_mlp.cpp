@@ -32,6 +32,7 @@
 #include "operations/aclnn/utils/utils.h"
 #include "operations/aclnn/ops/moe_distribute_combine_operation.h"
 #include "operations/aclnn/ops/moe_distribute_dispatch_operation.h"
+#include "operations/aclnn/ops/dispatch_gmm_combine_decode_operation.h"
 #include "operations/aclnn/ops/quant_gmm_dequant_operation.h"
 #include "operations/aclnn/ops/moe_distribute_combine_v2_operation.h"
 #include "operations/aclnn/ops/moe_distribute_dispatch_v2_operation.h"
@@ -925,6 +926,59 @@ atb::Status CreateMoeDistributeCombine(
     return atb::NO_ERROR;
 }
 
+atb::Status SetDispatchGmmCombineDecodeParam(
+    DispatchGmmCombineDecodeParam &dispatchParam, const MoeMlpParam &param)
+{
+    dispatchParam.epRankId = param.moeEpRank;
+    dispatchParam.epRankSize = param.moeEpSize;
+    dispatchParam.epCommName = param.moeEpDomain;
+    dispatchParam.maxDecodeDpTokenSize = param.maxDecodeDpTokenSize;
+    dispatchParam.moeExpertNum = param.numOfExperts;
+    dispatchParam.localMoeExpertNum = param.numOfDeviceExperts;
+    dispatchParam.sharedExpertNum = 0;
+    dispatchParam.sharedExpertRankNum = param.numDanglingSharedExperts;
+    dispatchParam.quantMode = 0;
+    dispatchParam.globalBS = 0;
+    return atb::NO_ERROR;
+}
+
+atb::Status CreateDispatchGmmCombineDecode(
+    std::map<std::string, uint32_t> &tensorMap, const MoeMlpParam &param,
+    atb::GraphParam &opGraph)
+{
+    if (param.packQuantType != atb_speed::common::PackQuantType::ALL_W8A8_DYNAMIC) {
+        ATB_SPEED_LOG_ERROR("DispatchGmmCombineDecode only supports ALL_W8A8_DYNAMIC currently, packQuantType="
+                            << param.packQuantType);
+        return atb::ERROR_INVALID_PARAM;
+    }
+
+    atb::Node dispatchGmmCombineNode;
+    atb_speed::common::DispatchGmmCombineDecodeParam dispatchParam;
+    CHECK_OPERATION_STATUS_RETURN(SetDispatchGmmCombineDecodeParam(dispatchParam, param));
+    dispatchGmmCombineNode.operation = new atb_speed::common::DispatchGmmCombineDecodeOperation(
+        "DispatchGmmCombineDecode", dispatchParam);
+
+    dispatchGmmCombineNode.inTensorIds = {
+        GetTensorIdx(tensorMap, "in_hiddenstates"),
+        GetTensorIdx(tensorMap, "in_selected_experts"),
+        GetTensorIdx(tensorMap, "in_mlp_gateup_weight_expert"),
+        GetTensorIdx(tensorMap, "in_mlp_gateup_scale_expert"),
+        GetTensorIdx(tensorMap, "in_mlp_down_weight_expert"),
+        GetTensorIdx(tensorMap, "in_mlp_down_scale_expert"),
+        GetTensorIdx(tensorMap, "in_expert_weight"),
+        GetTensorIdx(tensorMap, "in_padding_idx")};
+
+    dispatchGmmCombineNode.outTensorIds = {
+        GetTensorIdx(tensorMap, "out_moe_mlp_result"),
+        GetTensorIdx(tensorMap, "intermediate_group_list")};
+
+    CHECK_OPERATION_STATUS_RETURN(common::AddDapEventsBeforeComm(opGraph));
+    opGraph.nodes.push_back(dispatchGmmCombineNode);
+    CHECK_OPERATION_STATUS_RETURN(common::AddDapEventsAfterComm(opGraph));
+    ATB_SPEED_LOG_DEBUG("DispatchGmmCombineDecode calculation success");
+    return atb::NO_ERROR;
+}
+
 // Op5 - Gather1
 atb::Status CreateGather1(std::map<std::string, uint32_t> &tensorMap,
     std::shared_ptr<int64_t> batchDimPtr, atb::GraphParam &opGraph)
@@ -1085,6 +1139,10 @@ atb::Status CreateMoeDistribute(
 {
     std::shared_ptr<int64_t> batchDimPtr = std::make_shared<int64_t>(0);
     bool isGMMSwigluQuant = IsGMMSwigluQuant(CalcUpGmmQuantType(param), param);
+    if (param.enableDispatchGmmCombineDecode) {
+        CHECK_OPERATION_STATUS_RETURN(CreateDispatchGmmCombineDecode(tensorMap, param, opGraph));
+        return atb::NO_ERROR;
+    }
     CHECK_OPERATION_STATUS_RETURN(CreateMoeDistributeDispatch(tensorMap, param, opGraph));
     CHECK_OPERATION_STATUS_RETURN(CreateGmm(tensorMap, opGraph, param));
     if (!isGMMSwigluQuant) {

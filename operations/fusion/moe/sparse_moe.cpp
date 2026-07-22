@@ -723,6 +723,7 @@ atb::Status SetDynamicExpertParam(atb_speed::common::DynamicEpMoEParam &dynamicE
     dynamicExpertParam.enableExpertCumSumOutput = param.enableExpertCumSumOutput;
     dynamicExpertParam.enableGatingDp = param.enableGatingDp;
     dynamicExpertParam.enableDispatchCombineV2 = param.enableDispatchCombineV2;
+    dynamicExpertParam.enableDispatchGmmCombineDecode = param.enableDispatchGmmCombineDecode;
     dynamicExpertParam.enableLcocAll2All = param.enableLcocAll2All;
     dynamicExpertParam.lcclMoeEpDomain = param.lcclMoeEpDomain;
     dynamicExpertParam.lcclMoeEpHcclComm = param.lcclMoeEpHcclComm;

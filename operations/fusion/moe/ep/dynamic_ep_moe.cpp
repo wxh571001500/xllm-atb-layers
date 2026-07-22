@@ -303,6 +303,7 @@ atb::Status SetMoeMlpParam(atb_speed::common::MoeMlpParam &mlpExpertParam, const
     mlpExpertParam.enableExpertCumSumOutput = param.enableExpertCumSumOutput;
     mlpExpertParam.enableGatingDp = param.enableGatingDp;
     mlpExpertParam.enableDispatchCombineV2 = param.enableDispatchCombineV2;
+    mlpExpertParam.enableDispatchGmmCombineDecode = param.enableDispatchGmmCombineDecode;
     mlpExpertParam.numDanglingSharedExperts = param.numDanglingSharedExperts;
     mlpExpertParam.numOfRedundantExpert = param.numOfRedundantExpert;
     mlpExpertParam.enableIndexGmm = param.enableIndexGmm;
