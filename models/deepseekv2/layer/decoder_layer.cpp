@@ -39,6 +39,64 @@ static const uint64_t STREAM1 = 1;
 static const uint64_t NUM2 = 2;
 static const float FLOAT16_MAX = 65504.0f;
 static const float FLOAT16_MIN = -65504.0f;
+constexpr int32_t KIMI_K25_Q_LORA_RANK = 1536;
+constexpr int32_t KIMI_K25_KV_LORA_RANK = 512;
+constexpr int32_t KIMI_K25_QK_NOPE_HEAD_DIM = 128;
+constexpr int32_t KIMI_K25_QK_ROPE_HEAD_DIM = 64;
+constexpr uint32_t KIMI_K25_EXPERT_NUM = 384;
+constexpr int32_t KIMI_K25_TOPK_NUM = 8;
+
+static bool IsKimiK25FiaDecodeParam(const DecoderLayerParam &param)
+{
+    const bool hasAttnCp = param.mapping.Has(base::ATTN_CP) &&
+        param.mapping.Get(base::ATTN_CP).IsEnabled();
+    const bool hasAttnInnerSp = param.mapping.Has(base::ATTN_INNER_SP) &&
+        param.mapping.Get(base::ATTN_INNER_SP).IsEnabled();
+    return param.qLoraRank == KIMI_K25_Q_LORA_RANK &&
+           param.kvLoraRank == KIMI_K25_KV_LORA_RANK &&
+           param.qkNopeHeadDim == KIMI_K25_QK_NOPE_HEAD_DIM &&
+           param.qkRopeHeadDim == KIMI_K25_QK_ROPE_HEAD_DIM &&
+           param.numOfExperts == KIMI_K25_EXPERT_NUM &&
+           !param.numOfSelectedExperts.empty() &&
+           param.numOfSelectedExperts.at(0) == KIMI_K25_TOPK_NUM &&
+           param.index_n_heads == 0 &&
+           !param.enablePrefixCache &&
+           !hasAttnCp &&
+           !hasAttnInnerSp;
+}
+
+static bool UseKimiK25FiaDecode(const DecoderLayerParam &param)
+{
+    return param.enableKimiK25FiaDecode &&
+        IsKimiK25FiaDecodeParam(param);
+}
+
+static void ApplyKimiK25FiaDecodeParam(
+    atb_speed::deepseekV2::LatentAttentionParam<atb::infer::RmsNormParam> &latentAttentionParam,
+    const DecoderLayerParam &param)
+{
+    const bool useKimiK25FiaDecode = UseKimiK25FiaDecode(param);
+    latentAttentionParam.enableKimiK25FiaDecode = useKimiK25FiaDecode;
+    latentAttentionParam.enableKimiK25FiaDecodeLog = false;
+    if (!useKimiK25FiaDecode) {
+        return;
+    }
+
+    if (!param.isPrefill) {
+        latentAttentionParam.enableFusedMLA = false;
+        latentAttentionParam.enableMlaPreprocess = true;
+        latentAttentionParam.enableCustomizeMla = true;
+    }
+
+    if (latentAttentionParam.enableKimiK25FiaDecodeLog) {
+        ATB_SPEED_LOG_INFO("[KIMI_K25_FIA_DECODE] enabled, layer=" << param.layerId
+            << ", stage=" << (param.isPrefill ? "prefill" : "decode")
+            << ", fusedMLA=" << latentAttentionParam.enableFusedMLA
+            << ", mlaPreprocessV2=" << latentAttentionParam.enableMlaPreprocess
+            << ", customizeMLA=" << latentAttentionParam.enableCustomizeMla
+            << ", headsPerRank=" << param.numAttentionHeadsPerRank);
+    }
+}
 
 void SetDeepseekV2LayerInTensorDefaultCandidates(
     std::map<std::string, std::vector<std::string>> &deepseekV2LayerInTensorCandidates)
@@ -496,6 +554,7 @@ atb::Status SetLatentAttentionParam(
     latentAttentionParam.pageAttentionParam.maskType = atb::infer::PagedAttentionParam::MaskType::UNDEFINED;
     latentAttentionParam.enableMlaPreprocess = param.enableMlaPreprocess;
     latentAttentionParam.enableCustomizeMla = param.enableCustomizeMla;
+    latentAttentionParam.speculativeTokenNum = param.speculativeTokenNum;
     if (param.enableSpeculate) {
         if (param.maskfree) {
             latentAttentionParam.pageAttentionParam.maskType = \
@@ -548,6 +607,7 @@ atb::Status SetLatentAttentionParam(
     latentAttentionParam.enablePrefixCacheLocal = param.enablePrefixCacheLocal;
     latentAttentionParam.normEps = param.normEps;
     latentAttentionParam.softmaxScale = param.softmaxScale;
+    ApplyKimiK25FiaDecodeParam(latentAttentionParam, param);
     return atb::NO_ERROR;
 }
 

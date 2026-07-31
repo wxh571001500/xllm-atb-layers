@@ -18,6 +18,9 @@
 #include "operations/fusion/utils.h"
 #include "operations/aclrt/ops/aclrt_cmo_async.h"
 #include "operations/aclnn/ops/repeat_operation.h"
+#include "operations/aclnn/ops/mla_fused_infer_attention_operation.h"
+#include "operations/aclnn/ops/mla_transpose_batch_matmul_operation.h"
+#include "operations/aclnn/ops/mla_preprocess_v2_operation.h"
 #include <operations/aclnn/ops/multi_latent_attention.h>
 #include "operations/fusion/utils.h"
 #include "models/deepseekv2/operation/fa_update.h"
@@ -28,6 +31,14 @@
 
 namespace atb_speed {
 namespace deepseekV2 {
+
+namespace {
+
+// vLLM Ascend MLAPO uses 1e-6 for its q/kv LoRA RMSNorm stages.
+constexpr double KIMI_K25_VLLM_MLA_PREPROCESS_EPSILON = 1e-6;
+
+}  // namespace
+
 using namespace atb_speed::common;
 
 bool UseAttnLinearDesc(const std::vector<int> &attnLinearQuantType)
@@ -64,6 +75,18 @@ bool EnableFA3Quant(const LatentAttentionParam<NormParamType> &param)
 {
     return param.pageAttentionParam.quantType == \
         atb::infer::PagedAttentionParam::QuantType::TYPE_QUANT_QKV_ONLINE;
+}
+
+template <typename NormParamType>
+bool UseKimiK25FiaDecode(const LatentAttentionParam<NormParamType> &param)
+{
+    return param.enableKimiK25FiaDecode &&
+           !param.isPrefill &&
+           param.enableMlaPreprocess &&
+           param.enableCustomizeMla &&
+           !EnableFA3Quant(param) &&
+           !param.contextParallelInfo.IsEnabled() &&
+           !param.hasAttnInnerSp;
 }
 
 std::map<std::string, std::vector<std::string>> GetLatentAttnInTensorCandidates()
@@ -125,6 +148,12 @@ std::map<std::string, std::vector<std::string>> GetLatentAttnIntermediateTensorC
         {"q_lora", {"latent_qkv", "latent_q_norm", "q_lora_out"}},
         {"no_q_lora", {"latent_kv"}},
         {"mla_preprocess", {"intermediate_q_nope", "intermediate_self_attention", "reproj_o", "intermediate_q_rope"}},
+        {"mla_preprocess_v2", {
+            "in_input_norm", "intermediate_q_nope", "intermediate_self_attention", "reproj_o",
+            "intermediate_q_rope", "intermediate_mla_preprocess_inner_out"}},
+        {"kimi_k25_vllm_spec_adapter", {
+            "intermediate_q_nope_request_major", "intermediate_q_rope_request_major",
+            "intermediate_v_up_request_major"}},
         {"kv_quant_scale", {"intermediate_kv_int8"}},
         {"attn_cp_prefill", {
             "intermediate_kv_cp", "rope_k_o_cp", "intermediate_kv_cp_s", "rope_k_o_cp_s",
@@ -186,7 +215,15 @@ std::map<std::string, uint32_t> ConstructTensorMap(const LatentAttentionParam<No
             "qkvdown_dp" : "enable_preprocess_lcoc_tp", intermediateTensorList);
     }
     if (param.enableMlaPreprocess && !param.isPrefill) {
-        AddTensorToList(latentAttnIntermediateTensorCandidates, "mla_preprocess", intermediateTensorList);
+        AddTensorToList(latentAttnIntermediateTensorCandidates,
+            UseKimiK25FiaDecode(param) ? "mla_preprocess_v2" : "mla_preprocess",
+            intermediateTensorList);
+        if (UseKimiK25FiaDecode(param) &&
+            param.pageAttentionParam.calcType ==
+                atb::infer::PagedAttentionParam::CalcType::CALC_TYPE_SPEC) {
+            AddTensorToList(latentAttnIntermediateTensorCandidates,
+                "kimi_k25_vllm_spec_adapter", intermediateTensorList);
+        }
     } else {
         AddTensorToList(latentAttnIntermediateTensorCandidates, "default", intermediateTensorList);
         if (param.qLoraRank != 0) {
@@ -331,6 +368,74 @@ atb::Status AddMlaPreprocessNode(const LatentAttentionParam<NormParamType> &para
     };
     opGraph.nodes.push_back(mlaPreprocessNode);
     ATB_SPEED_LOG_DEBUG("MlaPreprocessNode calculation success");
+    return atb::NO_ERROR;
+}
+
+template <typename NormParamType>
+atb::Status AddMlaPreprocessV2Node(const LatentAttentionParam<NormParamType> &param, atb::GraphParam &opGraph,
+    std::map<std::string, uint32_t> &tensorMap)
+{
+    // vLLM applies the decoder input RMSNorm before MLAPO. Keep its model
+    // epsilon separate from MLAPO's q/kv LoRA RMSNorm epsilon.
+    atb::Node inputNormNode;
+    CHECK_OPERATION_STATUS_RETURN(atb::CreateOperation(param.normParamType, &inputNormNode.operation));
+    inputNormNode.inTensorIds = {
+        GetTensorIdx(tensorMap, "in_input"), GetTensorIdx(tensorMap, "in_norm_weight")
+    };
+    inputNormNode.outTensorIds = {GetTensorIdx(tensorMap, "in_input_norm")};
+    opGraph.nodes.push_back(inputNormNode);
+
+    atb::Node mlaPreprocessV2Node;
+    atb_speed::common::Mlapreprocessv2OperationParam mlaPreprocessV2Param;
+    mlaPreprocessV2Param.wdqDim = param.qLoraRank;
+    mlaPreprocessV2Param.qRopeDim = param.qkRopeHeadDim;
+    mlaPreprocessV2Param.kRopeDim = param.qkRopeHeadDim;
+    mlaPreprocessV2Param.epsilon = KIMI_K25_VLLM_MLA_PREPROCESS_EPSILON;
+    mlaPreprocessV2Param.doRmsNorm = false;
+    mlaPreprocessV2Param.qDownOutFlag = false;
+    if (EnableFA3Quant(param)) {
+        mlaPreprocessV2Param.cacheMode = atb::infer::MlaPreprocessParam::CacheMode::INT8_NZCACHE;
+    } else if (param.isNzCache) {
+        mlaPreprocessV2Param.cacheMode = atb::infer::MlaPreprocessParam::CacheMode::NZCACHE;
+    } else {
+        mlaPreprocessV2Param.cacheMode = atb::infer::MlaPreprocessParam::CacheMode::KROPE_CTKV;
+    }
+
+    if (param.enableKimiK25FiaDecodeLog) {
+        ATB_SPEED_LOG_INFO("[KIMI_K25_FIA_DECODE] use aclnnMlaPreprocessV2 decode preprocess");
+    }
+    mlaPreprocessV2Node.operation = new atb_speed::common::Mlapreprocessv2Operation(
+        "AclNNMlaPreprocessV2Node", mlaPreprocessV2Param);
+
+    mlaPreprocessV2Node.inTensorIds = {
+        GetTensorIdx(tensorMap, "in_input_norm"), GetTensorIdx(tensorMap, "in_norm_weight"),
+        GetTensorIdx(tensorMap, "in_norm_bias"), GetTensorIdx(tensorMap, "in_q_proj_a_scale"),
+        GetTensorIdx(tensorMap, "in_q_proj_a_offset"), GetTensorIdx(tensorMap, "in_q_proj_a_weight"),
+        GetTensorIdx(tensorMap, "in_q_proj_a_descale"), GetTensorIdx(tensorMap, "in_q_proj_a_bias"),
+        GetTensorIdx(tensorMap, "in_q_proj_a_layernorm_weight"), GetTensorIdx(tensorMap, "in_q_proj_a_layernorm_bias"),
+        GetTensorIdx(tensorMap, "in_q_proj_b_scale"), GetTensorIdx(tensorMap, "in_q_proj_b_offset"),
+        GetTensorIdx(tensorMap, "in_q_proj_b_weight"), GetTensorIdx(tensorMap, "in_q_proj_b_descale"),
+        GetTensorIdx(tensorMap, "in_q_proj_b_bias"), GetTensorIdx(tensorMap, "in_kv_proj_a_layernorm_weight"),
+        GetTensorIdx(tensorMap, "in_cos_embed"), GetTensorIdx(tensorMap, "in_sin_embed"),
+        GetTensorIdx(tensorMap, "in_k_proj_b_for_q_weight"), GetTensorIdx(tensorMap, "in_k_cache"),
+        GetTensorIdx(tensorMap, "in_k_rope_cache"), GetTensorIdx(tensorMap, "in_slots_in_pa_or_logn_in_fa"),
+    };
+    if (EnableFA3Quant(param)) {
+        mlaPreprocessV2Node.inTensorIds.push_back(GetTensorIdx(tensorMap, "in_k_quant_scale"));
+        mlaPreprocessV2Node.inTensorIds.push_back(GetTensorIdx(tensorMap, "in_q_quant_scale"));
+    } else {
+        mlaPreprocessV2Node.inTensorIds.push_back(GetTensorIdx(tensorMap, "in_kv_proj_with_mqa_scale"));
+        mlaPreprocessV2Node.inTensorIds.push_back(GetTensorIdx(tensorMap, "in_q_proj_b_scale"));
+    }
+    mlaPreprocessV2Node.outTensorIds = {
+        GetTensorIdx(tensorMap, "intermediate_q_nope"),
+        GetTensorIdx(tensorMap, "in_k_cache"),
+        GetTensorIdx(tensorMap, "intermediate_q_rope"),
+        GetTensorIdx(tensorMap, "in_k_rope_cache"),
+        GetTensorIdx(tensorMap, "intermediate_mla_preprocess_inner_out"),
+    };
+    opGraph.nodes.push_back(mlaPreprocessV2Node);
+    ATB_SPEED_LOG_DEBUG("MlaPreprocessV2Node calculation success");
     return atb::NO_ERROR;
 }
 
@@ -994,6 +1099,53 @@ atb::Status AddReprojVNode(const LatentAttentionParam<NormParamType> &param, atb
     return atb::NO_ERROR;
 }
 
+template <typename NormParamType>
+atb::Status AddKimiK25FiaDecodeVUpProjNode(const LatentAttentionParam<NormParamType> &param,
+    atb::GraphParam &opGraph, std::map<std::string, uint32_t> &tensorMap)
+{
+    const bool isSpecDecode =
+        param.pageAttentionParam.calcType ==
+        atb::infer::PagedAttentionParam::CalcType::CALC_TYPE_SPEC;
+    atb::Node vUpProjNode;
+    atb_speed::common::MlaTransposeBatchMatMulParam vUpProjParam;
+    vUpProjParam.numHeads = param.pageAttentionParam.headNum;
+    vUpProjParam.headDim = param.kvLoraRank;
+    vUpProjNode.operation = new atb_speed::common::MlaTransposeBatchMatMulOperation(
+        "KimiK25FiaDecodeVUpProjNode", vUpProjParam);
+    vUpProjNode.inTensorIds = {
+        GetTensorIdx(tensorMap, "reproj_o"),
+        GetTensorIdx(tensorMap, "in_v_proj_b_for_o_weight")
+    };
+    vUpProjNode.outTensorIds = {GetTensorIdx(tensorMap, isSpecDecode ?
+        "intermediate_v_up_request_major" : "intermediate_self_attention")};
+    opGraph.nodes.push_back(vUpProjNode);
+    if (isSpecDecode) {
+        atb::Node transposeNode;
+        atb::infer::TransposeParam transposeParam;
+        transposeParam.perm = {1, 0, 2, 3};
+        CHECK_OPERATION_STATUS_RETURN(
+            atb::CreateOperation(transposeParam, &transposeNode.operation));
+        transposeNode.inTensorIds = {
+            GetTensorIdx(tensorMap, "intermediate_v_up_request_major")};
+        transposeNode.outTensorIds = {
+            GetTensorIdx(tensorMap, "intermediate_self_attention")};
+        transposeNode.inTensorReshapeFuncs.resize(1);
+        transposeNode.inTensorReshapeFuncs[0] = [=](
+            const atb::Dims &oldShape, atb::Dims &newShape) {
+            newShape.dimNum = 4;
+            newShape.dims[0] = oldShape.dims[0] / param.speculativeTokenNum;
+            newShape.dims[1] = param.speculativeTokenNum;
+            newShape.dims[2] = oldShape.dims[1];
+            newShape.dims[3] = oldShape.dims[2];
+        };
+        opGraph.nodes.push_back(transposeNode);
+    }
+    if (param.enableKimiK25FiaDecodeLog) {
+        ATB_SPEED_LOG_INFO("[KIMI_K25_FIA_DECODE] use aclnnTransposeBatchMatMul for v_up_proj");
+    }
+    return atb::NO_ERROR;
+}
+
 
 template <typename NormParamType>
 atb::Status AddLAttnKProjBNode(const LatentAttentionParam<NormParamType> &param, atb::GraphParam &opGraph,
@@ -1528,7 +1680,11 @@ atb::Status Attention(const LatentAttentionParam<NormParamType> &param, atb::Ope
         if (param.contextParallelInfo.IsEnabled() || param.hasAttnInnerSp) {
             CHECK_OPERATION_STATUS_RETURN(AddDecodeUpdate(param, opGraph, tensorMap));
         }
-        CHECK_OPERATION_STATUS_RETURN(AddReprojVNode(param, opGraph, tensorMap));
+        if (UseKimiK25FiaDecode(param)) {
+            CHECK_OPERATION_STATUS_RETURN(AddKimiK25FiaDecodeVUpProjNode(param, opGraph, tensorMap));
+        } else {
+            CHECK_OPERATION_STATUS_RETURN(AddReprojVNode(param, opGraph, tensorMap));
+        }
     }
     if (param.enableExtraOprojTp || param.enableOutLcocTp) {
         if (param.attnOprojPrefetch) {
@@ -1597,7 +1753,11 @@ atb::Status Preprocess(const LatentAttentionParam<NormParamType> &param,
     atb::GraphParam &opGraph, std::map<std::string, uint32_t> &tensorMap)
 {
     if (param.qLoraRank > 0 && param.enableMlaPreprocess && !param.isPrefill) {
-        CHECK_OPERATION_STATUS_RETURN(AddMlaPreprocessNode(param, opGraph, tensorMap));
+        if (UseKimiK25FiaDecode(param)) {
+            CHECK_OPERATION_STATUS_RETURN(AddMlaPreprocessV2Node(param, opGraph, tensorMap));
+        } else {
+            CHECK_OPERATION_STATUS_RETURN(AddMlaPreprocessNode(param, opGraph, tensorMap));
+        }
     } else {
         CHECK_OPERATION_STATUS_RETURN(AddLAttnPreNormNode(param, opGraph, tensorMap));
         if (param.qLoraRank > 0 && param.enablePreprocessLcocTp) {
@@ -1852,7 +2012,6 @@ atb::Status AddEncoderMLANode(
     return atb::NO_ERROR;
 }
 
-
 template <typename NormParamType>
 atb::Status AddQSplitNode(const LatentAttentionParam<NormParamType> &param, atb::GraphParam &opGraph,
     std::map<std::string, uint32_t> &tensorMap)
@@ -1878,10 +2037,160 @@ atb::Status AddQSplitNode(const LatentAttentionParam<NormParamType> &param, atb:
 }
 
 template <typename NormParamType>
+atb::Status AddKimiK25FiaDecodeSpecQueryLayoutNodes(
+    const LatentAttentionParam<NormParamType> &param, atb::GraphParam &opGraph,
+    std::map<std::string, uint32_t> &tensorMap)
+{
+    if (param.speculativeTokenNum <= 1) {
+        ATB_SPEED_LOG_ERROR("invalid Kimi K2.5 speculative token count");
+        return atb::ERROR_INVALID_PARAM;
+    }
+
+    const std::vector<std::pair<std::string, std::string>> tensorNames = {
+        {"intermediate_q_nope", "intermediate_q_nope_request_major"},
+        {"intermediate_q_rope", "intermediate_q_rope_request_major"}
+    };
+    // Eagle3 stores validation tokens as [step, request]. FIA groups all
+    // validation tokens for one request contiguously, matching vLLM.
+    for (const auto &tensorName : tensorNames) {
+        atb::Node transposeNode;
+        atb::infer::TransposeParam transposeParam;
+        transposeParam.perm = {1, 0, 2, 3};
+        CHECK_OPERATION_STATUS_RETURN(
+            atb::CreateOperation(transposeParam, &transposeNode.operation));
+        transposeNode.inTensorIds = {GetTensorIdx(tensorMap, tensorName.first)};
+        transposeNode.outTensorIds = {GetTensorIdx(tensorMap, tensorName.second)};
+        transposeNode.inTensorReshapeFuncs.resize(1);
+        transposeNode.inTensorReshapeFuncs[0] = [=](
+            const atb::Dims &oldShape, atb::Dims &newShape) {
+            newShape.dimNum = 4;
+            newShape.dims[0] = param.speculativeTokenNum;
+            newShape.dims[1] = oldShape.dims[0] / param.speculativeTokenNum;
+            newShape.dims[2] = oldShape.dims[oldShape.dimNum - 2];
+            newShape.dims[3] = oldShape.dims[oldShape.dimNum - 1];
+        };
+        opGraph.nodes.push_back(transposeNode);
+    }
+    if (param.enableKimiK25FiaDecodeLog) {
+        ATB_SPEED_LOG_INFO(
+            "[KIMI_K25_FIA_DECODE] adapt Eagle3 validation query layout step-major -> request-major"
+            << ", speculativeTokenNum=" << param.speculativeTokenNum);
+    }
+    return atb::NO_ERROR;
+}
+
+template <typename NormParamType>
+atb::Status AddKimiK25MlaFiaDecodeNode(
+    const LatentAttentionParam<NormParamType> &param, atb::GraphParam &opGraph,
+    std::map<std::string, uint32_t> &tensorMap)
+{
+    atb::Node selfAttentionNode;
+    const bool isSpecDecode =
+        param.pageAttentionParam.calcType ==
+        atb::infer::PagedAttentionParam::CalcType::CALC_TYPE_SPEC;
+    atb_speed::common::MlaFusedInferAttentionParam fusedInferAttentionParam;
+    fusedInferAttentionParam.needMask = isSpecDecode;
+    fusedInferAttentionParam.needQuerySeqLen = isSpecDecode;
+    fusedInferAttentionParam.numQueryHeads = param.pageAttentionParam.headNum;
+    fusedInferAttentionParam.numKeyValueHeads = param.pageAttentionParam.kvHeadNum;
+    fusedInferAttentionParam.valueHeadDim = param.kvLoraRank;
+    fusedInferAttentionParam.speculativeTokenNum =
+        isSpecDecode ? param.speculativeTokenNum : 1;
+    fusedInferAttentionParam.softmaxScale = param.pageAttentionParam.qkScale;
+    fusedInferAttentionParam.inputLayout = isSpecDecode ? "TND_NTD" :
+        (param.isNzCache ? "BSND_NBSD" : "BNSD_NBSD");
+    fusedInferAttentionParam.sparseMode = isSpecDecode ? 3 : 0;
+    fusedInferAttentionParam.innerPrecise = 0;
+    fusedInferAttentionParam.blockSize = 0;
+
+    selfAttentionNode.operation = new atb_speed::common::MlaFusedInferAttentionOperation(
+        "KimiK25MlaFiaDecodeNode", fusedInferAttentionParam);
+    selfAttentionNode.inTensorIds = {
+        GetTensorIdx(tensorMap, isSpecDecode ?
+            "intermediate_q_nope_request_major" : "intermediate_q_nope"),
+        GetTensorIdx(tensorMap, "in_k_cache"),
+        GetTensorIdx(tensorMap, "in_k_cache"),
+        GetTensorIdx(tensorMap, isSpecDecode ?
+            "intermediate_q_rope_request_major" : "intermediate_q_rope"),
+        GetTensorIdx(tensorMap, "in_k_rope_cache"),
+        GetTensorIdx(tensorMap, "in_seq_len"),
+        GetTensorIdx(tensorMap, "in_block_tables")
+    };
+    if (fusedInferAttentionParam.needMask) {
+        selfAttentionNode.inTensorIds.push_back(GetTensorIdx(tensorMap, "in_attention_mask"));
+    }
+    if (fusedInferAttentionParam.needQuerySeqLen) {
+        selfAttentionNode.inTensorIds.push_back(GetTensorIdx(tensorMap, "in_q_len"));
+    }
+    selfAttentionNode.inTensorReshapeFuncs.resize(selfAttentionNode.inTensorIds.size());
+    selfAttentionNode.inTensorReshapeFuncs[0] = [=](const atb::Dims &oldShape, atb::Dims &newShape) {
+        newShape.dimNum = isSpecDecode ? 3 : 4; // 3: TND, 4: BNSD or BSND
+        if (isSpecDecode) {
+            newShape.dims[0] = oldShape.dims[0] * oldShape.dims[1];
+            newShape.dims[1] = param.pageAttentionParam.headNum;
+            newShape.dims[2] = oldShape.dims[oldShape.dimNum - 1];
+            return;
+        }
+        newShape.dims[0] = oldShape.dims[0];
+        newShape.dims[1] = param.isNzCache ? 1 : param.pageAttentionParam.headNum;
+        newShape.dims[2] = param.isNzCache ? param.pageAttentionParam.headNum : 1;
+        newShape.dims[3] = oldShape.dims[oldShape.dimNum - 1];
+    };
+    selfAttentionNode.inTensorReshapeFuncs[3] = [=](const atb::Dims &oldShape, atb::Dims &newShape) {
+        newShape.dimNum = isSpecDecode ? 3 : 4; // 3: TND, 4: BNSD or BSND
+        if (isSpecDecode) {
+            newShape.dims[0] = oldShape.dims[0] * oldShape.dims[1];
+            newShape.dims[1] = param.pageAttentionParam.headNum;
+            newShape.dims[2] = oldShape.dims[oldShape.dimNum - 1];
+            return;
+        }
+        newShape.dims[0] = oldShape.dims[0];
+        newShape.dims[1] = param.isNzCache ? 1 : param.pageAttentionParam.headNum;
+        newShape.dims[2] = param.isNzCache ? param.pageAttentionParam.headNum : 1;
+        newShape.dims[3] = oldShape.dims[oldShape.dimNum - 1];
+    };
+    for (uint32_t i : {1, 2, 4}) { // 1, 2, 4: k cache, v cache, k rope cache
+        selfAttentionNode.inTensorReshapeFuncs[i] = [](const atb::Dims &oldShape, atb::Dims &newShape) {
+            newShape = oldShape;
+            if (oldShape.dimNum == 4 && oldShape.dims[2] == 1 && oldShape.dims[1] > 1) {
+                newShape.dims[1] = oldShape.dims[2];
+                newShape.dims[2] = oldShape.dims[1];
+            }
+        };
+    }
+    if (isSpecDecode) {
+        selfAttentionNode.inTensorReshapeFuncs[6] = [=](
+            const atb::Dims &oldShape, atb::Dims &newShape) {
+            newShape.dimNum = 2;
+            newShape.dims[0] = oldShape.dims[0] / param.speculativeTokenNum;
+            newShape.dims[1] = oldShape.dims[1];
+        };
+    }
+    selfAttentionNode.outTensorIds = {GetTensorIdx(tensorMap, "reproj_o")};
+
+    if (param.enableKimiK25FiaDecodeLog) {
+        ATB_SPEED_LOG_INFO("[KIMI_K25_FIA_DECODE] use aclnnFusedInferAttentionScoreV4 " <<
+            (isSpecDecode ? "spec decode TND_NTD" : "decode NBSD"));
+    }
+    opGraph.nodes.push_back(selfAttentionNode);
+    ATB_SPEED_LOG_DEBUG("Kimi K2.5 MLA FIA decoder calculation success");
+    return atb::NO_ERROR;
+}
+
+template <typename NormParamType>
 atb::Status AddMlaDecoderNode(
     const LatentAttentionParam<NormParamType> &param, atb::GraphParam &opGraph,
     std::map<std::string, uint32_t> &tensorMap)
 {
+    if (UseKimiK25FiaDecode(param)) {
+        if (param.pageAttentionParam.calcType ==
+            atb::infer::PagedAttentionParam::CalcType::CALC_TYPE_SPEC) {
+            CHECK_OPERATION_STATUS_RETURN(
+                AddKimiK25FiaDecodeSpecQueryLayoutNodes(param, opGraph, tensorMap));
+        }
+        return AddKimiK25MlaFiaDecodeNode(param, opGraph, tensorMap);
+    }
+
     atb::Node selfAttentionNode;
     if (!param.enableCustomizeMla) {
         atb::infer::MultiLatentAttentionParam multiLatentAttentionParam;
@@ -1992,6 +2301,9 @@ atb::Status AddMlaDecoderNode(
     }
     if (param.contextParallelInfo.IsEnabled() || param.hasAttnInnerSp) {
         selfAttentionNode.outTensorIds = GetTensorIdxList(tensorMap, {"intermediate_go", "intermediate_lse"});
+    }
+    if (param.enableKimiK25FiaDecodeLog) {
+        ATB_SPEED_LOG_INFO("[KIMI_K25_FIA_DECODE] use aclnnMultiLatentAttention decode");
     }
     
     opGraph.nodes.push_back(selfAttentionNode);
