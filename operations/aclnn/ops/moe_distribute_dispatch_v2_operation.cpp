@@ -75,8 +75,13 @@ atb::Status MoeDistributeDispatchV2Operation::InferShape(
 
     outTensorDescs.at(DIM3).shape.dims[DIM0] = param_.localMoeExpertNum;
 
-    outTensorDescs.at(NUM4).shape.dims[DIM0] = param_.epRankSize * param_.localMoeExpertNum + \
-        globalBS * param_.topk * (param_.epRankSize / NUM8) * NUM2;
+    outTensorDescs.at(NUM4).shape.dims[DIM0] = param_.epRankSize * param_.localMoeExpertNum;
+    if (param_.tpRankSize == NUM2) {
+        outTensorDescs.at(NUM4).shape.dims[DIM0] *= param_.tpRankSize;
+    }
+    if (param_.enableExpertScales) {
+        outTensorDescs.at(NUM4).shape.dims[DIM0] += globalBS * param_.topk * (param_.epRankSize / NUM8) * NUM2;
+    }
 
     outTensorDescs.at(NUM5).shape.dims[DIM0] = 1;
 
@@ -89,11 +94,7 @@ atb::Status MoeDistributeDispatchV2Operation::InferShape(
 
 uint32_t MoeDistributeDispatchV2Operation::GetInputNum() const
 {
-    if (param_.quantSmooth) {
-        return NUM5;
-    } else {
-        return NUM4; // 4translatedintensor: hiddenstates, selected_experts, expert_weight, padding_idx
-    }
+    return param_.quantSmooth ? NUM5 : NUM4;
 }
 
 uint32_t MoeDistributeDispatchV2Operation::GetOutputNum() const
@@ -132,15 +133,22 @@ int MoeDistributeDispatchV2Operation::SetAclNNWorkspaceExecutor()
 
     AclNNVariantPack &aclnnVariantPack = this->aclnnOpCache_->aclnnVariantPack;
 
-    aclnnVariantPack.aclInTensors.at(NUM2)->tensorIdx = NUM4;
+    aclTensor *expertScalesTensor = nullptr;
+    if (param_.enableExpertScales) {
+        aclnnVariantPack.aclInTensors.at(NUM2)->tensorIdx = NUM4;
+        expertScalesTensor = aclnnVariantPack.aclInTensors.at(NUM2)->tensor;
+    } else {
+        aclnnVariantPack.aclInTensors.at(NUM2)->needUpdateTensorDataPtr = false;
+    }
     aclnnVariantPack.aclInTensors.at(NUM3)->needUpdateTensorDataPtr = false;
-    int32_t globalBS = GetGlobalBS(aclnnVariantPack.aclInTensors.at(NUM3)->atbTensor.desc);
+    int32_t globalBS =
+        GetGlobalBS(aclnnVariantPack.aclInTensors.at(NUM3)->atbTensor.desc);
     int ret = aclnnMoeDistributeDispatchV2GetWorkspaceSize(
         aclnnVariantPack.aclInTensors.at(DIM0)->tensor,
         aclnnVariantPack.aclInTensors.at(DIM1)->tensor,
         param_.quantSmooth ? aclnnVariantPack.aclInTensors.at(DIM2)->tensor : nullptr,
         nullptr,
-        aclnnVariantPack.aclInTensors.at(NUM2)->tensor,
+        expertScalesTensor,
         param_.epCommName.data(),
         param_.epRankSize,
         param_.epRankId,

@@ -938,6 +938,7 @@ void SetMoeParam(atb_speed::common::SparseMoeParam &sparseMoeParam,
 
   // Data type and optimization settings
   sparseMoeParam.isBF16 = moe_config.use_bf16;
+  sparseMoeParam.isPrefill = param.isPrefill;
   sparseMoeParam.supportSwiGLU = true;
   sparseMoeParam.transpose = true;
   sparseMoeParam.gateUpTransposeB = true;

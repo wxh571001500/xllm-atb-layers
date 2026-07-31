@@ -107,6 +107,8 @@ public:
     int speculativeTokenNum = 1;
 
     bool enableKimiK25FiaDecode = false;
+    bool enableKimiK25MoeGatingTopK = false;
+    bool enableKimiK25MoeMc2 = false;
     bool enableAllToAllMC2 = false;
     HcclComm hcclComm = nullptr;
     bool enableGatherPreNorm = false;

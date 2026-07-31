@@ -347,6 +347,7 @@ atb::Status SetMoeNode(const MoeDecoderLayerParam &param, atb::GraphParam &opGra
     sparseMoeParam.numOfExperts = param.numOfExperts;
     sparseMoeParam.num = param.numOfSelectedExperts;
     sparseMoeParam.isBF16 = param.isBF16;
+    sparseMoeParam.isPrefill = param.isPrefill;
     sparseMoeParam.expertParallelDegree = param.expertParallelDegree;
     sparseMoeParam.processLogits = param.processLogits;
     sparseMoeParam.supportSwiGLU = param.enableSwiGLU;

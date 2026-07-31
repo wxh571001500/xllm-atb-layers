@@ -27,6 +27,7 @@ struct MoeDistributeDispatchV2Param {
     bool isQuant = false;
     bool isSharedExpert = false;
     bool quantSmooth = false;
+    bool enableExpertScales = true;
     std::string tpCommName;
     std::string epCommName;
     std::string commAlg;

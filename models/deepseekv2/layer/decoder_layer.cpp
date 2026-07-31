@@ -71,6 +71,34 @@ static bool UseKimiK25FiaDecode(const DecoderLayerParam &param)
         IsKimiK25FiaDecodeParam(param);
 }
 
+static bool IsKimiK25MoeParam(const DecoderLayerParam &param)
+{
+    return param.numOfExperts == KIMI_K25_EXPERT_NUM &&
+           !param.numOfSelectedExperts.empty() &&
+           param.numOfSelectedExperts.at(0) == KIMI_K25_TOPK_NUM &&
+           param.routingMethod == "noAuxTc" &&
+           param.processLogits == "normScaling" &&
+           param.numOfGroups == 1 &&
+           !param.topkGroups.empty() &&
+           param.topkGroups.at(0) == 1 &&
+           !param.enableLoadBalance &&
+           !param.enableEPWB &&
+           !param.mixSharedRouting;
+}
+
+static bool UseKimiK25MoeGatingTopK(const DecoderLayerParam &param)
+{
+    return param.enableKimiK25MoeGatingTopK &&
+        IsKimiK25MoeParam(param);
+}
+
+static bool UseKimiK25MoeMc2(const DecoderLayerParam &param)
+{
+    return param.enableKimiK25MoeMc2 &&
+        IsKimiK25MoeParam(param) &&
+        param.enableAllToAllMC2;
+}
+
 static void ApplyKimiK25FiaDecodeParam(
     atb_speed::deepseekV2::LatentAttentionParam<atb::infer::RmsNormParam> &latentAttentionParam,
     const DecoderLayerParam &param)
@@ -1096,6 +1124,7 @@ atb::Status SetSparseMoeParam(atb_speed::common::SparseMoeParam &sparseMoeParam,
     sparseMoeParam.downTransposeB = param.moeLinearTransposeType[MOE_DOWN_LINEAR_INDEX];
     sparseMoeParam.numOfExperts = param.numOfExperts;
     sparseMoeParam.numOfDeviceExperts = param.numOfDeviceExperts;
+    sparseMoeParam.isPrefill = param.isPrefill;
     sparseMoeParam.num = param.numOfSelectedExperts;
     sparseMoeParam.routingMethod = param.routingMethod;
     sparseMoeParam.numOfGroups = param.numOfGroups;
@@ -1136,8 +1165,15 @@ atb::Status SetSparseMoeParam(atb_speed::common::SparseMoeParam &sparseMoeParam,
     sparseMoeParam.numOfRedundantExpert = param.numOfRedundantExpert;
     sparseMoeParam.numDanglingSharedExperts = param.numDanglingSharedExperts;
     sparseMoeParam.maxDecodeDpTokenSize = param.maxDecodeDpTokenSize;
-    sparseMoeParam.enableMoeDistribute = !param.isPrefill && param.enableAllToAllMC2 && param.isDynamicEp;
-    sparseMoeParam.enableDispatchCombineV2 = param.enableDispatchCombineV2;
+    sparseMoeParam.enableKimiK25MoeGatingTopK = UseKimiK25MoeGatingTopK(param);
+    const bool useKimiK25MoeMc2 = UseKimiK25MoeMc2(param);
+    sparseMoeParam.enableMoeDistribute =
+        !param.isPrefill && param.enableAllToAllMC2 && param.isDynamicEp;
+    if (param.enableKimiK25MoeMc2) {
+        sparseMoeParam.enableMoeDistribute = sparseMoeParam.enableMoeDistribute && useKimiK25MoeMc2;
+    }
+    sparseMoeParam.enableDispatchCombineV2 = param.enableDispatchCombineV2 ||
+                                             (sparseMoeParam.enableMoeDistribute && useKimiK25MoeMc2);
     sparseMoeParam.enableGatingDp = param.enableGatingDp && param.isPrefill;  // h3p gatingdp for moe
     sparseMoeParam.enableGatingShift = param.enableGatingDp && !param.isPrefill;  // h3p gatingshift for decode
     sparseMoeParam.enableGatingOverlap = sparseMoeParam.enableGatingDp &&
