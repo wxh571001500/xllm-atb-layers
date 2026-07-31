@@ -659,6 +659,7 @@ void MoeDecoderLayer<NormType>::SetSparseMoeParam(atb_speed::common::SparseMoePa
     sparseMoeParam.routingMethod = this->param.routingMethod;
     sparseMoeParam.moeLinearQuantType = this->param.moeLinearQuantType;
     sparseMoeParam.isBF16 = this->param.isBF16;
+    sparseMoeParam.isPrefill = this->param.isPrefill;
     sparseMoeParam.enableFusedRouting = this->param.enableFusedRouting;
     sparseMoeParam.hasMoeEp = this->param.hasMoeEp;
     sparseMoeParam.gateUpTransposeB = this->param.moeLinearTransposeType[moeGateupLinearIndex];

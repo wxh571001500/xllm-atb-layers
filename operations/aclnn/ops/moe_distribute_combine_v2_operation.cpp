@@ -71,7 +71,8 @@ int MoeDistributeCombineV2Operation::SetAclNNWorkspaceExecutor()
     AclNNVariantPack &aclnnVariantPack = this->aclnnOpCache_->aclnnVariantPack;
     
     aclnnVariantPack.aclInTensors.at(NUM6)->tensorIdx = NUM10;
-    int64_t globalBS = GetGlobalBS(aclnnVariantPack.aclInTensors.at(DIM0)->atbTensor.desc);
+    int64_t globalBS =
+        GetGlobalBS(aclnnVariantPack.aclInTensors.at(DIM0)->atbTensor.desc);
     int ret = aclnnMoeDistributeCombineV2GetWorkspaceSize(
         aclnnVariantPack.aclInTensors.at(DIM0)->tensor,
         aclnnVariantPack.aclInTensors.at(DIM1)->tensor,

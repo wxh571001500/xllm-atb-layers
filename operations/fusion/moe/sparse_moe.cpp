@@ -29,6 +29,7 @@
 #include "operations/aclnn/ops/matmul_operation.h"
 #include "operations/aclnn/ops/cast_operation.h"
 #include "operations/aclnn/ops/concat_operation.h"
+#include "operations/aclnn/ops/moe_gating_topk_operation.h"
 #include "operations/aclnn/ops/moe_fused_add_topk.h"
 #include "operations/aclnn/ops/moe_fused_reducesum_div_operation.h"
 #include "atb_speed/base/event_manager.h"
@@ -48,6 +49,35 @@ static const uint64_t NUM5 = 5;
 constexpr uint32_t TOPK_IN_NUM = 4;
 constexpr uint32_t TOPK_IN3_DIM = 3;
 constexpr const char* FUSED_ADD_TOPK_ADDNUM_FP32 = "intermediate_router_bias_fp32";
+constexpr uint32_t KIMI_K25_EXPERT_NUM = 384;
+constexpr int32_t KIMI_K25_TOPK_NUM = 8;
+
+static bool UseKimiK25MoeGatingTopK(const SparseMoeParam &param)
+{
+    return param.enableKimiK25MoeGatingTopK &&
+           param.routingMethod == "noAuxTc" &&
+           param.processLogits == "normScaling" &&
+           !param.enableFusedTopk &&
+           !param.enableGatingDp &&
+           !param.enableGatingShift &&
+           !param.mixSharedRouting &&
+           !param.enableEPWB &&
+           !param.enableLoadBalance &&
+           !param.useStdNorm &&
+           param.numOfExperts == KIMI_K25_EXPERT_NUM &&
+           param.numOfGroups == 1 &&
+           !param.num.empty() &&
+           param.num.at(0) == KIMI_K25_TOPK_NUM &&
+           !param.topkGroups.empty() &&
+           param.topkGroups.at(0) == 1;
+}
+
+static bool UseKimiK25W8A8GmmSwigluQuant(const SparseMoeParam &param)
+{
+    return UseKimiK25MoeGatingTopK(param) &&
+           param.enableFusedRouting &&
+           param.packQuantType == atb_speed::common::PackQuantType::ALL_W8A8_DYNAMIC;
+}
 
 std::map<std::string, std::vector<std::string>> GetSparseMoeInTensorCandidates()
 {
@@ -99,6 +129,14 @@ atb::Status ConstructRoutingTensorMap(const SparseMoeParam &param, std::vector<s
 {
     if (param.enableATBGateMatmul && param.routingMethod == "noAuxTc") {
         ConstructATBGateMatmulTensorMap(param, interTensorList);
+    }
+    if (UseKimiK25MoeGatingTopK(param)) {
+        interTensorList.push_back("intermediate_router_weights");
+        interTensorList.push_back("intermediate_router_weights_topk_reduced");
+        if (param.enableMoeDistribute) {
+            interTensorList.push_back("intermediate_router_weights_topk_reduced_fp32");
+        }
+        return atb::NO_ERROR;
     }
     if (!param.enableFusedTopk) {
         interTensorList.push_back("intermediate_router_weights");
@@ -377,6 +415,37 @@ atb::Status CreateFusedAddTopk(std::map<std::string, uint32_t> &tensorMap,
     }
     opGraph.nodes.push_back(fusedAddTopkNode);
     ATB_SPEED_LOG_DEBUG("FusedAddTopkOperation calculation success");
+    return atb::NO_ERROR;
+}
+
+atb::Status CreateKimiK25MoeGatingTopK(std::map<std::string, uint32_t> &tensorMap,
+    const SparseMoeParam &param, atb::GraphParam &opGraph)
+{
+    atb::Node moeGatingTopKNode;
+    atb_speed::common::MoeGatingTopKParam moeGatingTopKParam;
+    moeGatingTopKParam.k = static_cast<int64_t>(param.num.at(0));
+    moeGatingTopKParam.kGroup = static_cast<int64_t>(param.topkGroups.at(0));
+    moeGatingTopKParam.groupCount = static_cast<int64_t>(param.numOfGroups);
+    moeGatingTopKParam.groupSelectMode = 1;
+    moeGatingTopKParam.renorm = 0;
+    moeGatingTopKParam.normType = 1;
+    moeGatingTopKParam.outFlag = false;
+    moeGatingTopKParam.routedScalingFactor = static_cast<double>(param.routedScalingFactor);
+    moeGatingTopKParam.eps = 1e-20;
+
+    moeGatingTopKNode.operation =
+        new atb_speed::common::MoeGatingTopKOperation("MoeGatingTopKOperation", moeGatingTopKParam);
+    moeGatingTopKNode.inTensorIds = {GetTensorIdx(tensorMap, (param.enableGatingShift) ? \
+                                         "intermediate_router_logits_shifted" : "intermediate_router_logits"),
+                                     GetTensorIdx(tensorMap, "in_gate_bias")};
+    moeGatingTopKNode.outTensorIds = {GetTensorIdx(tensorMap, "intermediate_router_weights_topk_reduced"),
+                                      GetTensorIdx(tensorMap, "intermediate_selected_experts"),
+                                      GetTensorIdx(tensorMap, "intermediate_router_weights")};
+    if (param.enableGatingOverlap) {
+        atb::SetExecuteStreamId(moeGatingTopKNode.operation, STREAM1);
+    }
+    opGraph.nodes.push_back(moeGatingTopKNode);
+    ATB_SPEED_LOG_DEBUG("MoeGatingTopKOperation calculation success");
     return atb::NO_ERROR;
 }
 
@@ -676,6 +745,7 @@ atb::Status CreateVectorNorm(std::map<std::string, uint32_t> &tensorMap, atb::Gr
 
 atb::Status SetDynamicExpertParam(atb_speed::common::DynamicEpMoEParam &dynamicExpertParam, const SparseMoeParam &param)
 {
+    const bool useKimiK25W8A8GmmSwigluQuant = UseKimiK25W8A8GmmSwigluQuant(param);
     dynamicExpertParam.transpose = param.transpose;
     dynamicExpertParam.topk = param.num.at(0);
     if (param.mixSharedRouting) {
@@ -698,10 +768,10 @@ atb::Status SetDynamicExpertParam(atb_speed::common::DynamicEpMoEParam &dynamicE
     dynamicExpertParam.gateUpTransposeB = param.gateUpTransposeB;
     dynamicExpertParam.downTransposeB = param.downTransposeB;
     dynamicExpertParam.enableFusedRouting = param.enableFusedRouting;
-    dynamicExpertParam.enableGMMSwigluQuant = param.enableGMMSwigluQuant;
+    dynamicExpertParam.enableGMMSwigluQuant = param.enableGMMSwigluQuant || useKimiK25W8A8GmmSwigluQuant;
     dynamicExpertParam.enableInitQuant = param.enableInitQuant;
     dynamicExpertParam.enableInitRoutingV3 = param.enableInitRoutingV3;
-    dynamicExpertParam.enableSwigluQuant = param.enableSwigluQuant;
+    dynamicExpertParam.enableSwigluQuant = useKimiK25W8A8GmmSwigluQuant ? false : param.enableSwigluQuant;
     dynamicExpertParam.enableAtlasGMMFused = param.enableAtlasGMMFused;
     dynamicExpertParam.backend = param.backend;
     dynamicExpertParam.swigluBackend = param.swigluBackend;
@@ -910,6 +980,11 @@ atb::Status RoutingBlock(
     std::map<std::string, uint32_t> &tensorMap,
     const SparseMoeParam &param, atb::GraphParam &opGraph)
 {
+    if (UseKimiK25MoeGatingTopK(param)) {
+        CHECK_OPERATION_STATUS_RETURN(CreateKimiK25MoeGatingTopK(tensorMap, param, opGraph));
+        ATB_SPEED_LOG_DEBUG("Routing Block success");
+        return atb::NO_ERROR;
+    }
     if (param.enableFusedTopk) {
         CHECK_OPERATION_STATUS_RETURN(CreateFusedAddTopk(tensorMap, param, opGraph));
         // CHECK_OPERATION_STATUS_RETURN(CreateFusedAddTopkDiv(tensorMap, param, opGraph));
@@ -1115,7 +1190,11 @@ atb::Status CreateSparseMoeOperation(const SparseMoeParam &param, atb::Operation
     CHECK_OPERATION_STATUS_RETURN(RoutingBlock(tensorMap, param, opGraph));
 
     bool skipCast = !param.enableFusedTopk && !param.enableMoeDistribute && (param.processLogits != "none") && (!param.enableFusedTopk || param.enableGatingDp) && !param.mixSharedRouting;
-    if (!param.enableFusedTopk && param.processLogits != "none") {
+    const bool useKimiK25MoeGatingTopK = UseKimiK25MoeGatingTopK(param);
+    if (useKimiK25MoeGatingTopK && param.enableMoeDistribute) {
+        CHECK_OPERATION_STATUS_RETURN(CreateFp32Cast(tensorMap, opGraph));
+    }
+    if (!useKimiK25MoeGatingTopK && !param.enableFusedTopk && param.processLogits != "none") {
         if (param.processLogits == "normalization") {
 	    if (param.enableFusedReducesumDiv){
             	CHECK_OPERATION_STATUS_RETURN(CreateSparseMoefusedReducesumDivide(tensorMap, opGraph));

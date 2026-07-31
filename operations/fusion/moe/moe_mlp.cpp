@@ -15,6 +15,7 @@
 *  */
 #include "moe_mlp.h"
 #include <atb/atb_infer.h>
+#include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <algorithm>
@@ -42,6 +43,17 @@
 
 namespace atb_speed {
 namespace common {
+
+constexpr uint32_t KIMI_K25_EXPERT_NUM = 384;
+constexpr int32_t KIMI_K25_TOPK_NUM = 8;
+
+static bool UseKimiK25MoeMc2(const MoeMlpParam &param)
+{
+    return param.enableMoeDistribute &&
+           param.enableDispatchCombineV2 &&
+           param.numOfExperts == KIMI_K25_EXPERT_NUM &&
+           param.topk == KIMI_K25_TOPK_NUM;
+}
 
 int CalcUpGmmQuantType(const MoeMlpParam &param)
 {
@@ -93,7 +105,7 @@ std::map<std::string, std::vector<std::string>> GetMoeMlpInTensorCandidates()
         },
         {"ep", {
             "in_zero_hot", "in_start_expert_idx", "in_device_expert_count", "in_padding_idx"}
-        }
+        },
     };
     return moeMlpInTensorCandidates;
 }
@@ -230,7 +242,6 @@ std::map<std::string, uint32_t> ConstructTensorMap(
     if (param.hasMoeEp) {
         AddTensorToList(moeMlpInTensorCandidates, "ep", inTensorList);
     }
-
     AddIntermediateTensor(param, interTensorList);
 
     if (param.enableExpertCumSumOutput) {
@@ -815,6 +826,12 @@ atb::Status SetMoeDistributeDispatchParam(DispatchParam &dispatchParam, const Mo
     dispatchParam.localMoeExpertNum = param.numOfDeviceExperts;
     dispatchParam.sharedExpertRankNum = param.numDanglingSharedExperts;
     dispatchParam.topk = param.topk;
+    if (UseKimiK25MoeMc2(param)) {
+        dispatchParam.enableExpertScales = false;
+        dispatchParam.tpCommName = param.moeEpDomain;
+        dispatchParam.tpRankSize = 1;
+        dispatchParam.tpRankId = 0;
+    }
     if (param.packQuantType == atb_speed::common::PackQuantType::ALL_W4A8) {
         dispatchParam.expertTokenNumsType = 1;
     }
@@ -853,7 +870,6 @@ atb::Status CreateMoeDistributeDispatch(
                                    GetTensorIdx(tensorMap, "in_selected_experts"),
                                    GetTensorIdx(tensorMap, "in_expert_weight"),
                                    GetTensorIdx(tensorMap, "in_padding_idx")};
-
     moeDistributeDispatchNode.outTensorIds = {GetTensorIdx(tensorMap, "intermediate_sorted_hiddenstates"),
                                     GetTensorIdx(tensorMap, "intermediate_gmm0_deqscale"),
                                     GetTensorIdx(tensorMap, "intermediate_idx"),
@@ -880,6 +896,11 @@ atb::Status SetMoeDistributeCombineParam(CombineParam &combineParam, const MoeMl
     combineParam.maxDecodeDpTokenSize = param.maxDecodeDpTokenSize;
     combineParam.sharedExpertRankNum = param.numDanglingSharedExperts;
     combineParam.topk = param.topk;
+    if (UseKimiK25MoeMc2(param)) {
+        combineParam.tpCommName = param.moeEpDomain;
+        combineParam.tpRankSize = 1;
+        combineParam.tpRankId = 0;
+    }
     const char *hcclIntraPcie = std::getenv("HCCL_INTRA_PCIE_ENABLE");
     const char *hcclIntraRoce = std::getenv("HCCL_INTRA_ROCE_ENABLE");
     if (hcclIntraPcie != nullptr && hcclIntraRoce != nullptr
@@ -915,7 +936,6 @@ atb::Status CreateMoeDistributeCombine(
                                  GetTensorIdx(tensorMap, "intermediate_tp_recv_counts"),
                                  GetTensorIdx(tensorMap, "intermediate_expand_expert_weight"),
                                  };
-
     CHECK_OPERATION_STATUS_RETURN(common::AddDapEventsBeforeComm(opGraph));
     opGraph.nodes.push_back(moeDistributeCombineNode);
     CHECK_OPERATION_STATUS_RETURN(common::AddDapEventsAfterComm(opGraph));
