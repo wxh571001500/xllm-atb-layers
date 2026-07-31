@@ -104,7 +104,9 @@ public:
 
     bool enableLoadBalance = false;
     bool maskfree = true;
+    int speculativeTokenNum = 1;
 
+    bool enableKimiK25FiaDecode = false;
     bool enableAllToAllMC2 = false;
     HcclComm hcclComm = nullptr;
     bool enableGatherPreNorm = false;

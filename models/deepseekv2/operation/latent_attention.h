@@ -58,6 +58,9 @@ struct LatentAttentionParam {
     int qkNopeHeadDim = 128;
     int qkRopeHeadDim = 64;
     bool enableMlaPreprocess = false;
+    bool enableKimiK25FiaDecode = false;
+    bool enableKimiK25FiaDecodeLog = false;
+    int speculativeTokenNum = 1;
     bool enableExtraOprojTp = false;
     bool enableCustomizeMla = false;
     bool isNzCache = false;
