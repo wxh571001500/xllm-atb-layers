@@ -221,7 +221,7 @@ void SetFusionAttentionParam(
         fusionAttentionParam.pageAttentionParam.maskType = \
             atb::infer::PagedAttentionParam::MaskType::MASK_TYPE_NORM;
     }
-    fusionAttentionParam.selfOutLinearTensorParallelInfo = { param.rank, param.worldSize, param.backend };
+    fusionAttentionParam.selfOutLinearTensorParallelInfo = param.tensorParallelInfo;
     if (param.kvQuant) {
         fusionAttentionParam.pageAttentionParam.quantType = atb::infer::PagedAttentionParam::TYPE_DEQUANT_FUSION;
         fusionAttentionParam.pageAttentionParam.maskType = atb::infer::PagedAttentionParam::UNDEFINED;
@@ -323,7 +323,7 @@ void SetMlpParam(atb_speed::common::MlpParam<atb::infer::RmsNormParam> &mlpParam
     mlpParam.supportLora = param.supportLora;
     mlpParam.loraEnableGMM = param.loraEnableGMM;
     // c_proj(down)
-    mlpParam.downLinearTensorParallelInfo = {param.rank, param.worldSize, param.backend};
+    mlpParam.downLinearTensorParallelInfo = param.tensorParallelInfo;
     mlpParam.supportLcoc = param.supportLcoc;
     if (param.supportSwiGLU) {
         mlpParam.activationParam.activationType = atb::infer::ActivationType::ACTIVATION_SWIGLU_FORWARD;
@@ -397,8 +397,8 @@ atb::Status DecoderLayer(const DecoderLayerParam &param, atb::Operation **operat
     atb::infer::ConcatParam catParam;
     catParam.concatDim = -1;
     CHECK_OPERATION_STATUS_RETURN(atb::CreateOperation(catParam, &catNode.operation));
-    catNode.inTensorIds = {atb_speed::common::GetTensorIdxList(tensorMap, {"intermediate_innorm_out",
-    "intermediate_hiddennorm_out"})};
+    catNode.inTensorIds = atb_speed::common::GetTensorIdxList(
+        tensorMap, {"intermediate_innorm_out", "intermediate_hiddennorm_out"});
     catNode.outTensorIds = {atb_speed::common::GetTensorIdx(tensorMap, "intermediate_eagle_attn_in")};
     opGraph.nodes.push_back(catNode);
 
